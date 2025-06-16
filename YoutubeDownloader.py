@@ -66,12 +66,8 @@ class YTDLPGUIApp:
         self.progress_bar = ttk.Progressbar(self.main_frame, orient="horizontal", mode="determinate")
         self.progress_bar.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
 
-
-        self.elapsed_label = tk.Label(self.main_frame, text="Elapsed: 00:00:00", font=("Inter", 9))
+        self.elapsed_label = tk.Label(self.main_frame, text="Elapsed: 00:00:00 | 0.0%", font=("Inter", 9))
         self.elapsed_label.grid(row=7, column=0, sticky="w", padx=5)
-
-        self.percent_label = tk.Label(self.main_frame, text="0%", font=("Inter", 9))
-        self.percent_label.grid(row=7, column=1, sticky="e", padx=5)
 
         self.output_box = scrolledtext.ScrolledText(self.main_frame, wrap=tk.WORD, font=("Roboto", 9), height=5)
         self.output_box.grid(row=8, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
@@ -79,13 +75,11 @@ class YTDLPGUIApp:
 
         self.main_frame.grid_rowconfigure(8, weight=1)
 
-        self.status_bar = tk.Label(master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=("Inter", 9))
+        self.status_bar = tk.Label(master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=("Inter", 9), fg="black")
         self.status_bar.pack(side="bottom", fill="x")
 
         self.output_queue = queue.Queue()
-        self.last_command = None
         self.current_process = None
-        self.last_progress_value = -1
         self.start_time = None
 
         if hasattr(sys, '_MEIPASS'):
@@ -96,46 +90,23 @@ class YTDLPGUIApp:
         self.master.after(100, self.poll_queues)
         self.on_source_change("YouTube")
 
-    def set_input_fields_state(self, state):
-        widgets = [
-            self.url_entry, self.filename_entry,
-            self.source_menu, self.mp3_check,
-            self.quality_menu, self.referer_entry
-        ]
-        for widget in widgets:
-            widget.config(state=state)
-
     def on_source_change(self, value):
         if value == "YouTube":
             self.referer_label.grid_forget()
             self.referer_entry.grid_forget()
-            self.quality_label.grid(row=2, column=0, sticky="w", padx=5)
-            self.quality_menu.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+            self.quality_label.grid()
+            self.quality_menu.grid()
         else:
             self.quality_label.grid_forget()
             self.quality_menu.grid_forget()
             self.referer_label.grid(row=2, column=0, sticky="w", padx=5)
             self.referer_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
 
-    def update_output(self, text):
-        self.output_box.config(state="normal")
-        self.output_box.insert(END, text)
-        self.output_box.see(END)
-        self.output_box.config(state="disabled")
-
     def set_status(self, text, color="black"):
         self.status_bar.config(text=text, fg=color)
 
-    def start_download_on_enter(self, event=None):
-        self.start_download_thread()
-
     def start_download_thread(self):
         url = self.url_entry.get().strip()
-        referer = self.referer_entry.get().strip()
-        filename = self.filename_entry.get().strip()
-        source = self.source_var.get()
-        mp3 = self.mp3_var.get()
-
         if not url:
             messagebox.showwarning("Input Error", "Target URL is required.")
             return
@@ -150,104 +121,80 @@ class YTDLPGUIApp:
         self.restart_button.config(state="disabled")
         self.set_input_fields_state("disabled")
         self.progress_bar.config(mode="determinate", value=0)
-        self.progress_label.config(text="0%")
-        self.percent_label.config(text="0%")
-        self.last_progress_value = -1
         self.start_time = time.time()
-        self.elapsed_label.config(text="Elapsed: 00:00:00")
 
+        command = self.build_command(url)
+        threading.Thread(target=self.run_yt_dlp, args=(command,), daemon=True).start()
+
+    def build_command(self, url):
         command = [self.yt_dlp_path, url]
-
-        if source == "XtremeStream" and referer:
-            command += ["--add-header", f"referer: {referer}"]
+        if self.source_var.get() == "XtremeStream" and self.referer_entry.get().strip():
+            command += ["--add-header", f"referer: {self.referer_entry.get().strip()}"]
 
         downloads_dir = os.path.join(os.getcwd(), 'downloads')
-        os.makedirs(downloads_dir, exist_ok=True)
-
         temp_dir = os.path.join(downloads_dir, 'temp')
         os.makedirs(temp_dir, exist_ok=True)
         command += ["--paths", f"temp:{temp_dir}"]
 
-        out_name = os.path.splitext(filename)[0] if filename else "%(title)s"
-        out_name += ".mp3" if mp3 else ".mp4"
-        command += ["--output", os.path.join(downloads_dir, out_name)]
-
-        if mp3:
+        out_name = self.filename_entry.get().strip() or "%(title)s"
+        if self.mp3_var.get():
+            out_name += ".mp3"
             command += ["--extract-audio", "--audio-format", "mp3"]
         else:
+            out_name += ".mp4"
             command += ["--recode-video", "mp4"]
 
-        if source == "YouTube":
+        command += ["--output", os.path.join(downloads_dir, out_name)]
+
+        if self.source_var.get() == "YouTube":
             q = self.quality_var.get()
-            if q == "High Quality - 1080p":
+            if "1080" in q:
                 command += ['-f', 'bestvideo[height>=1080]+bestaudio/best[height<=1080]']
-            elif q == "Medium Quality - 720p":
+            elif "720" in q:
                 command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
-            elif q == "Low Quality - 480p":
+            elif "480" in q:
                 command += ['-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]']
 
-        self.last_command = command
-        threading.Thread(target=self._run_yt_dlp, args=(command, downloads_dir, temp_dir), daemon=True).start()
+        return command
 
-    def _run_yt_dlp(self, command, downloads_dir, temp_dir):
+    def run_yt_dlp(self, command):
         self.output_queue.put(f"Executing: {' '.join(command)}\n")
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             self.current_process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                creationflags=creationflags
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, creationflags=creationflags
             )
-
-            for line in iter(self.current_process.stdout.readline, ''):
+            for line in self.current_process.stdout:
                 self.output_queue.put(line)
-                self.parse_progress_line(line)
+                percent = self.extract_percentage(line)
+                if percent is not None:
+                    self.progress_bar.config(value=percent)
+                    self.set_status("Downloading...", "blue")
+                if "ffmpeg" in line.lower() or "merging formats" in line.lower():
+                    self.set_status("Converting...", "blue")
 
             rc = self.current_process.wait()
             if rc == 0:
                 self.set_status("Download Complete!", "green")
-                self.show_completion_alert(downloads_dir)
+                self.show_completion_alert()
             else:
                 self.set_status(f"Failed (Exit {rc})", "red")
         except Exception as e:
             self.set_status(f"Error: {e}", "red")
             self.output_queue.put(f"Error: {e}\n")
         finally:
-            self.download_button.config(state="normal")
-            self.abort_button.config(state="disabled")
-            self.restart_button.config(state="normal")
-            self.progress_bar.stop()
-            self.progress_bar.config(value=0, mode="determinate")
-            self.progress_label.config(text="0%")
-            self.percent_label.config(text="0%")
-            self.set_input_fields_state("normal")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            self.start_time = None
+            self.reset_ui()
+            shutil.rmtree(os.path.join(os.getcwd(), 'downloads', 'temp'), ignore_errors=True)
 
-    def parse_progress_line(self, line):
-        if '[download]' in line and '%' in line:
+    def abort_download(self):
+        if self.current_process:
             try:
-                percent_str = line.split('[download]')[1].split('%')[0].strip()
-                percent_float = float(percent_str)
-                if abs(percent_float - self.last_progress_value) >= 1:
-                    self.last_progress_value = percent_float
-                    self.progress_bar.config(value=percent_float)
-                    self.progress_label.config(text=f"{percent_float:.1f}%")
-                    self.percent_label.config(text=f"{percent_float:.1f}%")
-                    if not self.status_bar.cget("text").startswith("Downloading"):
-                        self.set_status("Downloading...", "blue")
-            except:
+                self.current_process.kill()
+            except Exception:
                 pass
-        elif any(x in line for x in ['[ExtractAudio]', '[ffmpeg]', '[Merger]']):
-            if self.progress_bar["mode"] != "indeterminate":
-                self.progress_bar.config(mode="indeterminate")
-                self.progress_bar.start(10)
-                self.progress_label.config(text="")
-                self.set_status("Converting...", "blue")
+        self.output_queue.put("\nProcess aborted by user.\n")
+        self.set_status("Download Aborted", "orange")
+        self.reset_ui()
 
     def poll_queues(self):
         try:
@@ -260,35 +207,52 @@ class YTDLPGUIApp:
         if self.start_time:
             elapsed = int(time.time() - self.start_time)
             h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
-            self.elapsed_label.config(text=f"Elapsed: {h:02}:{m:02}:{s:02}")
+            percent = self.progress_bar['value']
+            self.elapsed_label.config(text=f"Elapsed: {h:02}:{m:02}:{s:02} | {percent:.1f}%")
 
         self.master.after(100, self.poll_queues)
 
-    def show_completion_alert(self, downloads_dir):
-        if messagebox.askokcancel("Download Complete", "The download has finished. Open download folder?"):
-            os.startfile(downloads_dir)
+    def update_output(self, text):
+        self.output_box.config(state="normal")
+        self.output_box.insert(END, text)
+        self.output_box.see(END)
+        self.output_box.config(state="disabled")
 
-    def abort_download(self):
-        if self.current_process and self.current_process.poll() is None:
-            self.current_process.terminate()
-            self.set_status("Download Aborted", "orange")
-            self.output_queue.put("\nProcess aborted by user.\n")
-            self.download_button.config(state="normal")
-            self.abort_button.config(state="disabled")
-            self.restart_button.config(state="normal")
-            self.progress_bar.stop()
-            self.progress_bar.config(value=0, mode="determinate")
-            self.progress_label.config(text="0%")
-            self.percent_label.config(text="0%")
-            self.set_input_fields_state("normal")
-            self.start_time = None
+    def extract_percentage(self, line):
+        try:
+            parts = line.split()
+            for part in parts:
+                if part.endswith('%'):
+                    value = float(part.strip('%'))
+                    return value
+        except Exception:
+            pass
+        return None
+
+    def reset_ui(self):
+        self.download_button.config(state="normal")
+        self.abort_button.config(state="disabled")
+        self.restart_button.config(state="normal")
+        self.progress_bar.stop()
+        self.progress_bar.config(value=0, mode="determinate")
+        self.set_input_fields_state("normal")
+        self.start_time = None
+        if "Download" not in self.status_bar.cget("text"):
+            self.set_status("Ready", "black")
+
+    def set_input_fields_state(self, state):
+        for widget in [self.url_entry, self.filename_entry, self.source_menu, self.mp3_check, self.quality_menu, self.referer_entry]:
+            widget.config(state=state)
 
     def restart_download(self):
-        if self.last_command:
-            self.progress_bar.config(value=0, mode="determinate")
-            self.progress_label.config(text="0%")
-            self.percent_label.config(text="0%")
-            self.start_download_thread()
+        self.start_download_thread()
+
+    def show_completion_alert(self):
+        if messagebox.askokcancel("Download Complete", "The download has finished. Open download folder?"):
+            os.startfile(os.path.join(os.getcwd(), 'downloads'))
+
+    def start_download_on_enter(self, event=None):
+        self.start_download_thread()
 
 if __name__ == "__main__":
     root = tk.Tk()
