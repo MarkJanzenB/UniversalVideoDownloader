@@ -72,8 +72,8 @@ class YTDLPGUIApp:
         self.elapsed_label = tk.Label(self.main_frame, text="Elapsed: 00:00:00", font=("Inter", 9))
         self.elapsed_label.grid(row=7, column=0, sticky="w", padx=5)
 
-        self.eta_label = tk.Label(self.main_frame, text="ETA: --:--:--", font=("Inter", 9))
-        self.eta_label.grid(row=7, column=1, sticky="e", padx=5)
+        self.percent_label = tk.Label(self.main_frame, text="0%", font=("Inter", 9))
+        self.percent_label.grid(row=7, column=1, sticky="e", padx=5)
 
         self.output_box = scrolledtext.ScrolledText(self.main_frame, wrap=tk.WORD, font=("Roboto", 9), height=5)
         self.output_box.grid(row=8, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
@@ -153,10 +153,10 @@ class YTDLPGUIApp:
         self.set_input_fields_state("disabled")
         self.progress_bar.config(mode="determinate", value=0)
         self.progress_label.config(text="0%")
+        self.percent_label.config(text="0%")
         self.last_progress_value = -1
         self.start_time = time.time()
         self.elapsed_label.config(text="Elapsed: 00:00:00")
-        self.eta_label.config(text="ETA: --:--:--")
 
         command = [self.yt_dlp_path, url]
 
@@ -225,10 +225,10 @@ class YTDLPGUIApp:
             self.progress_bar.stop()
             self.progress_bar.config(value=0, mode="determinate")
             self.progress_label.config(text="0%")
+            self.percent_label.config(text="0%")
             self.set_input_fields_state("normal")
             shutil.rmtree(temp_dir, ignore_errors=True)
             self.start_time = None
-            self.eta_label.config(text="ETA: --:--:--")
 
     def parse_progress_line(self, line):
         if '[download]' in line and '%' in line:
@@ -239,16 +239,11 @@ class YTDLPGUIApp:
                     self.last_progress_value = percent_float
                     self.progress_bar.config(value=percent_float)
                     self.progress_label.config(text=f"{percent_float:.1f}%")
+                    self.percent_label.config(text=f"{percent_float:.1f}%")
                     if not self.status_bar.cget("text").startswith("Downloading"):
                         self.set_status("Downloading...", "blue")
             except:
                 pass
-            if 'ETA' in line:
-                try:
-                    eta_part = line.split('ETA')[1].strip().split()[0]
-                    self.eta_label.config(text=f"ETA: {eta_part}")
-                except:
-                    self.eta_label.config(text="ETA: --:--:--")
         elif any(x in line for x in ['[ExtractAudio]', '[ffmpeg]', '[Merger]']):
             if self.progress_bar["mode"] != "indeterminate":
                 self.progress_bar.config(mode="indeterminate")
@@ -286,14 +281,15 @@ class YTDLPGUIApp:
             self.progress_bar.stop()
             self.progress_bar.config(value=0, mode="determinate")
             self.progress_label.config(text="0%")
+            self.percent_label.config(text="0%")
             self.set_input_fields_state("normal")
             self.start_time = None
-            self.eta_label.config(text="ETA: --:--:--")
 
     def restart_download(self):
         if self.last_command:
             self.progress_bar.config(value=0, mode="determinate")
             self.progress_label.config(text="0%")
+            self.percent_label.config(text="0%")
             self.start_download_thread()
 
 if __name__ == "__main__":
