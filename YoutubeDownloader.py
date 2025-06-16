@@ -5,7 +5,7 @@ import sys
 import os
 import threading
 import queue
-import time
+import shutil
 
 class YTDLPGUIApp:
     def __init__(self, master):
@@ -79,7 +79,6 @@ class YTDLPGUIApp:
         self.current_process = None
         self.last_progress_value = -1
 
-        # yt-dlp path resolution
         if hasattr(sys, '_MEIPASS'):
             self.yt_dlp_path = os.path.join(sys._MEIPASS, 'yt-dlp.exe')
         else:
@@ -152,6 +151,10 @@ class YTDLPGUIApp:
         downloads_dir = os.path.join(os.getcwd(), 'downloads')
         os.makedirs(downloads_dir, exist_ok=True)
 
+        temp_dir = os.path.join(downloads_dir, 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        command += ["--paths", f"temp:{temp_dir}"]
+
         out_name = os.path.splitext(filename)[0] if filename else "%(title)s"
         out_name += ".mp3" if mp3 else ".mp4"
         command += ["--output", os.path.join(downloads_dir, out_name)]
@@ -164,16 +167,16 @@ class YTDLPGUIApp:
         if source == "YouTube":
             q = self.quality_var.get()
             if q == "High Quality - 1080p":
-                command += ['-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]']
+                command += ['-f', 'bestvideo[height>=1080]+bestaudio/best[height<=1080]']
             elif q == "Medium Quality - 720p":
                 command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
             elif q == "Low Quality - 480p":
                 command += ['-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]']
 
         self.last_command = command
-        threading.Thread(target=self._run_yt_dlp, args=(command, downloads_dir), daemon=True).start()
+        threading.Thread(target=self._run_yt_dlp, args=(command, downloads_dir, temp_dir), daemon=True).start()
 
-    def _run_yt_dlp(self, command, downloads_dir):
+    def _run_yt_dlp(self, command, downloads_dir, temp_dir):
         self.output_queue.put(f"Executing: {' '.join(command)}\n")
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
@@ -206,6 +209,7 @@ class YTDLPGUIApp:
             self.restart_button.config(state="normal")
             self.progress_bar.stop()
             self.set_input_fields_state("normal")
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def parse_progress_line(self, line):
         if '[download]' in line and '%' in line:
