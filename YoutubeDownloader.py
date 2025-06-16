@@ -66,8 +66,6 @@ class YTDLPGUIApp:
         self.progress_bar = ttk.Progressbar(self.main_frame, orient="horizontal", mode="determinate")
         self.progress_bar.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
 
-        self.progress_label = tk.Label(self.main_frame, text="0%", anchor="center", font=("Inter", 9, "bold"))
-        self.progress_label.place(in_=self.progress_bar, relx=0.5, rely=0.5, anchor="center")
 
         self.elapsed_label = tk.Label(self.main_frame, text="Elapsed: 00:00:00", font=("Inter", 9))
         self.elapsed_label.grid(row=7, column=0, sticky="w", padx=5)
