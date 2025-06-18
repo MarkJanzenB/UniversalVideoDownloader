@@ -52,7 +52,12 @@ class DownloadItem:
         self.item_id = item_data.get('id')  # Unique ID for this item instance
         self.url = item_data['url']
         self.quality = item_data.get('quality', 'N/A')  # Quality might not be in history items
-        self.filename = item_data.get('filename')  # Resolved filename or original proposed
+
+        # Ensure filename is always a string.
+        # Get the raw value, then explicitly convert to string if not None, otherwise default to empty string.
+        raw_filename = item_data.get('filename')
+        self.filename = str(raw_filename) if raw_filename is not None else ''
+
         self.mp3_conversion = item_data.get('mp3_conversion', False)  # Not always needed for history display
         self.source = item_data.get('source', 'N/A')
         self.referer = item_data.get('referer', '')
@@ -208,14 +213,14 @@ class DownloadItem:
 
                 result = subprocess.run(command, capture_output=True, text=True, check=True,
                                         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
-                                        timeout=10)
+                                        timeout=30)
                 metadata = json.loads(result.stdout)
                 self.video_title = metadata.get('title', 'Unknown Title')
 
                 # If filename was NOT explicitly set by user, update it with the fetched title
                 if not self.filename_provided_by_user:
                     sanitized_title = re.sub(r'[\\/:*?"<>|]', '', self.video_title)
-                    self.filename = sanitized_title
+                    self.filename = sanitized_title if sanitized_title else f"VideoPlayback_{self.item_id}"  # Fallback to generic name
 
                 self.is_title_fetched = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)  # Refresh entire display
@@ -223,7 +228,7 @@ class DownloadItem:
             except FileNotFoundError:
                 self.video_title = "Error: yt-dlp.exe not found."
                 if not self.filename_provided_by_user:
-                    self.filename = self.url.split('/')[-1].split('?')[0][:50]
+                    self.filename = f"VideoPlayback_{self.item_id}"  # Fallback to generic name
                 self.is_title_fetched = False
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
@@ -231,7 +236,7 @@ class DownloadItem:
             except subprocess.CalledProcessError as e:
                 self.video_title = f"Error fetching title: Command failed. {e.stderr.strip()}"
                 if not self.filename_provided_by_user:
-                    self.filename = self.url.split('/')[-1].split('?')[0][:50]
+                    self.filename = f"VideoPlayback_{self.item_id}"  # Fallback to generic name
                 self.is_title_fetched = False
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
@@ -239,7 +244,7 @@ class DownloadItem:
             except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
                 self.video_title = f"Error fetching title: {e}"
                 if not self.filename_provided_by_user:
-                    self.filename = self.url.split('/')[-1].split('?')[0][:50]
+                    self.filename = f"VideoPlayback_{self.item_id}"  # Fallback to generic name
                 self.is_title_fetched = False
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
@@ -247,7 +252,7 @@ class DownloadItem:
             except Exception as e:
                 self.video_title = f"Unexpected error fetching title: {e}"
                 if not self.filename_provided_by_user:
-                    self.filename = self.url.split('/')[-1].split('?')[0][:50]
+                    self.filename = f"VideoPlayback_{self.item_id}"  # Fallback to generic name
                 self.is_title_fetched = False
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
@@ -319,7 +324,7 @@ class DownloadItem:
         os.makedirs(temp_dir, exist_ok=True)
         command += ["--paths", f"temp:{temp_dir}"]
 
-        out_name = self.filename
+        out_name = self.filename  # This is now guaranteed to be a string due to __init__ changes
 
         if self.mp3_conversion:
             command += ["--extract-audio", "--audio-format", "mp3", "--output",
@@ -511,6 +516,7 @@ class YTDLPGUIApp:
 
         self._create_widgets()  # This will now create the single combined view
         self._initialize_download_management()
+        self._cleanup_temp_directories_on_launch()  # Call cleanup function on launch
         self._load_downloads_from_local_history()
 
         self.master.after(100, self._process_queue_loop)
@@ -682,8 +688,8 @@ class YTDLPGUIApp:
         self.open_downloads_button.pack(side="left", expand=True, fill="x", padx=2)
 
         self.clear_history_button = tk.Button(control_buttons_frame, text="Clear History",
-                                              command=self._clear_finished_history, bg=COLOR_CLEAR_BUTTON, fg="black",
-                                              font=BOLD_FONT)
+                                              command=self._clear_finished_history, bg=COLOR_CLEAR_BUTTON,
+                                              fg="black", font=BOLD_FONT)
         self.clear_history_button.pack(side="left", expand=True, fill="x", padx=2)
 
         # --- Combined Downloads Display Area ---
@@ -711,6 +717,7 @@ class YTDLPGUIApp:
         self.downloads_frame_inner.bind("<Configure>", lambda e: self.downloads_canvas.configure(
             scrollregion=self.downloads_canvas.bbox("all")))
         self.downloads_canvas.bind('<Configure>', self._on_downloads_canvas_resize)
+
         # Added mouse wheel scrolling for the combined downloads display
         self.downloads_canvas.bind('<MouseWheel>', self._on_mousewheel)
         self.downloads_canvas.bind('<Button-4>', self._on_mousewheel)
@@ -736,14 +743,11 @@ class YTDLPGUIApp:
         self.queued_downloads = []  # List of DownloadItem objects (waiting to start)
         self.active_downloads = []  # List of DownloadItem objects (currently downloading)
         self.download_items_map = {}  # {item_id: DownloadItem object} for easy lookup of all items (active and finished)
-
         self.finished_downloads_data = []  # List of dictionaries for finished downloads history (used for saving/loading)
-
         self.download_item_counter = 0
         self.completed_downloads_count = 0
         self.total_downloads_added = 0
         self.is_queue_processing_active = False
-
         self.all_downloads_completed = threading.Event()
         self.alert_on_completion_for_session = False  # New flag to control session-based alerts
 
@@ -761,32 +765,29 @@ class YTDLPGUIApp:
         if value == YOUTUBE_SOURCE:
             self.referer_label.grid_forget()
             self.referer_entry.grid_forget()
-
             self._update_quality_options_grouped(
                 [("Auto (Best available)", "Auto (Best available)")],
-                [], [], [],
+                [],
+                [],
+                [],
                 [("1080", "High Quality - 1080p")],
                 [("720", "Medium Quality - 720p")],
                 [("480", "Low Quality - 480p")]
             )
             self.quality_label.grid(row=quality_row, column=0, sticky="w", padx=5, pady=2)
             self.quality_menu.grid(row=quality_row, column=1, sticky="ew", padx=5, pady=2)
-
             self._on_url_focus_out()
         else:  # XtremeStream
             self.quality_label.grid_forget()
             self.quality_menu.grid_forget()
-
             self.referer_label.grid(row=referer_row, column=0, sticky="w", padx=5, pady=2)
             self.referer_entry.grid(row=referer_row, column=1, sticky="ew", padx=5, pady=2)
 
         last_input_row = self.mp3_check.grid_info()["row"]
-
         if self.source_var.get() == XTREAM_SOURCE and self.referer_entry.winfo_ismapped():
             last_input_row = max(last_input_row, self.referer_entry.grid_info()["row"])
         elif self.source_var.get() == YOUTUBE_SOURCE and self.quality_menu.winfo_ismapped():
             last_input_row = max(last_input_row, self.quality_menu.grid_info()["row"])
-
         self.add_to_queue_button.grid(row=last_input_row + 1, column=0, columnspan=2, sticky="ew", pady=10)
 
     def _set_status(self, text, color="black"):
@@ -806,576 +807,296 @@ class YTDLPGUIApp:
 
         source = self.source_var.get()
         quality = self.quality_var.get()
-        filename_input = self.filename_entry.get().strip()
+        filename_input = self.filename_entry.get().strip()  # Get user-provided filename
 
         filename_provided_by_user = bool(filename_input)
-        filename = filename_input if filename_provided_by_user else url.split('/')[-1].split('?')[0][:50]
+
+        # Determine the filename to use. Always ensure it's a string.
+        filename_for_item_data = ""  # Initialize to empty string
+        if filename_input:
+            filename_for_item_data = filename_input
+        else:
+            # First, try to use the fetched video title if available and meaningful
+            # For YouTube, the video_title is fetched asynchronously. When adding to queue,
+            # it might still be 'Fetching Title...'. So, use it only if it's already fetched.
+            # This logic needs to consider that the DownloadItem itself will handle fetching the title.
+            # For now, we'll use a generic fallback. The DownloadItem's fetch_title_async will update
+            # its own filename if filename_provided_by_user is False.
+
+            # For initial queuing, use a generic placeholder. The DownloadItem will update it.
+            filename_for_item_data = f"VideoPlayback_{self.download_item_counter}"
+            # This ensures that `filename` is always a string from the moment `DownloadItem` is created.
 
         mp3_conversion = self.mp3_var.get()
         referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
 
+        # Increment counter for unique ID
         self.download_item_counter += 1
-        item_id = f"dl_{self.download_item_counter}_{int(time.time())}"
-        current_time_str = time.strftime("%m|%d|%Y - %I:%M%p")
+        item_id = self.download_item_counter
 
-        new_download_data = {
+        item_data = {
             'id': item_id,
             'url': url,
             'quality': quality,
-            'filename': filename,
+            'filename': filename_for_item_data,  # Now guaranteed to be a string
             'mp3_conversion': mp3_conversion,
             'source': source,
             'referer': referer,
+            'video_title': 'Fetching Title...',  # This will be updated by fetch_title_async
             'status': 'queued',
-            'video_title': 'Fetching Title...',
-            'date_added': current_time_str,
+            'date_added': time.strftime("%m|%d|%Y - %I:%M%p"),
             'filename_provided_by_user': filename_provided_by_user,
-            'elapsed_time_seconds': 0
+            'elapsed_time_seconds': 0  # Added this line from original snippet for completeness
         }
 
-        new_item = DownloadItem(self, new_download_data, is_active_item=True)  # Always active initially
+        new_item = DownloadItem(self, item_data, is_active_item=True)
         self.queued_downloads.append(new_item)
-        self.download_items_map[new_item.item_id] = new_item  # Add to overall map of all items
+        self.download_items_map[item_id] = new_item
         self.total_downloads_added += 1
+        self._refresh_display_order()  # Refresh display to show the new item
+        self._set_status(f"Added '{url}' to queue.", COLOR_STATUS_READY)
 
-        self._set_status(f"Added '{url[:40]}...' to queue. Queue size: {len(self.queued_downloads)}",
-                         COLOR_STATUS_READY)
-        self._update_queue_control_buttons()
-
-        # Set flag for session-based completion alert and clear event
-        self.alert_on_completion_for_session = True
-        self.all_downloads_completed.clear()
-
-        # Clear input fields after adding
         self.url_entry.delete(0, END)
         self.filename_entry.delete(0, END)
-        if self.source_var.get() == XTREAM_SOURCE:
-            self.referer_entry.delete(0, END)
-
-        # Reset quality dropdown to default "Auto (Best available)" after adding
-        self._update_quality_options_grouped(
-            [("Auto (Best available)", "Auto (Best available)")],
-            [], [], [],
-            [("1080", "High Quality - 1080p")],
-            [("720", "Medium Quality - 720p")],
-            [("480", "Low Quality - 480p")]
-        )
-
-        self._refresh_display_order()  # Refresh to show new queued item
-        self.downloads_canvas.yview_moveto(1.0)  # Scroll to new item
-
-        self._process_queue()
+        self.mp3_var.set(False)
+        self.referer_entry.delete(0, END)
+        self.url_entry.focus_set()
+        self.alert_on_completion_for_session = True  # Enable alert for this session if any downloads are added
 
     def _add_to_queue_on_enter(self, event=None):
-        """Handler for 'Return' key press in URL entry."""
+        """Handles adding to queue when Enter is pressed in URL entry."""
         self._add_current_to_queue()
 
     def _on_url_focus_out(self, event=None):
-        """Triggered when URL entry loses focus; fetches available qualities."""
+        """
+        Attempts to pre-fill filename based on URL if not provided by user and source is YouTube.
+        Prioritizes fetched title, then sensible fallback.
+        """
         url = self.url_entry.get().strip()
-        if url and (url.startswith("http://") or url.startswith("https://")):
-            self._fetch_and_update_quality_options(url)
-        elif self.source_var.get() == YOUTUBE_SOURCE:
-            self._update_quality_options_grouped(
-                [("Auto (Best available)", "Auto (Best available)")],
-                [], [], [],
-                [("1080", "High Quality - 1080p")],
-                [("720", "Medium Quality - 720p")],
-                [("480", "Low Quality - 480p")]
-            )
+        if url and self.source_var.get() == YOUTUBE_SOURCE and not self.filename_entry.get().strip():
+            # Create a dummy item to fetch title without adding to queue
+            # This is a temporary DownloadItem solely for title fetching preview
+            temp_item_data = {
+                'id': -1,  # Dummy ID
+                'url': url,
+                'quality': self.quality_var.get(),
+                'filename': '',  # Empty for fetching
+                'mp3_conversion': self.mp3_var.get(),
+                'source': self.source_var.get(),
+                'referer': self.referer_entry.get().strip(),
+                'video_title': 'Fetching Title...',
+                'status': 'temp_fetching',
+                'date_added': 'N/A',
+                'filename_provided_by_user': False,
+                'elapsed_time_seconds': 0
+            }
+            temp_item = DownloadItem(self, temp_item_data, is_active_item=True)
 
-    def _fetch_and_update_quality_options(self, url):
-        """Fetches available formats from yt-dlp and updates the quality OptionMenu."""
-        self.quality_var.set("Fetching qualities...")
+            def _update_filename_after_fetch():
+                if not self.filename_entry.get().strip():  # Only update if user hasn't typed anything
+                    if temp_item.is_title_fetched and temp_item.video_title != 'Unknown Title' and temp_item.video_title != 'Fetching Title...':
+                        sanitized_title = re.sub(r'[\\/:*?"<>|]', '', temp_item.video_title)
+                        self.filename_entry.delete(0, END)
+                        self.filename_entry.insert(0, sanitized_title[:50])  # Limit length for preview
+                    else:
+                        # Fallback to generic name if title fetch failed or is still pending
+                        self.filename_entry.delete(0, END)
+                        self.filename_entry.insert(0, f"VideoPlayback_Preview")  # Generic name for preview
 
-        fixed_high_q = [("1080", "High Quality - 1080p")]
-        fixed_medium_q = [("720", "Medium Quality - 720p")]
-        fixed_low_q = [("480", "Low Quality - 480p")]
+            # Fetch title asynchronously and then update filename_entry
+            threading.Thread(
+                target=lambda: (temp_item.fetch_title_async(), self.master.after(500, _update_filename_after_fetch)),
+                daemon=True).start()
 
-        def _fetch_formats():
-            try:
-                command = [
-                    self.yt_dlp_path,
-                    "--list-formats",
-                    "--print-json",
-                    url
-                ]
-                result = subprocess.run(command, capture_output=True, text=True, check=True,
-                                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
-                                        timeout=15)
-                metadata = json.loads(result.stdout)
-                formats = metadata.get('formats', [])
+    def _update_quality_options_grouped(self, auto, combined_video_audio, combined_audio_only, video_only,
+                                        high_quality_video, medium_quality_video, low_quality_video):
+        """Updates the quality OptionMenu with new options based on source."""
+        menu = self.quality_menu["menu"]
+        menu.delete(0, "end")  # Clear existing options
 
-                high_qualities_dynamic = []
-                medium_qualities_dynamic = []
-                low_qualities_dynamic = []
+        def add_command(value):
+            menu.add_command(label=value, command=tk._setit(self.quality_var, value))
 
-                for fmt in formats:
-                    height = fmt.get('height')
-                    vcodec = fmt.get('vcodec')
-                    acodec = fmt.get('acodec')
+        # Grouping logic
+        if auto:
+            for text, val in auto:
+                add_command(text)
+            menu.add_separator()
+        if combined_video_audio:
+            menu.add_command(label="--- Combined Video + Audio ---", state="disabled")
+            for res, text in combined_video_audio:
+                add_command(f"{text} - {res}p")
+            menu.add_separator()
+        if combined_audio_only:
+            menu.add_command(label="--- Combined Audio Only ---", state="disabled")
+            for res, text in combined_audio_only:
+                add_command(f"{text} - {res}p")
+            menu.add_separator()
+        if video_only:
+            menu.add_command(label="--- Video Only ---", state="disabled")
+            for res, text in video_only:
+                add_command(f"{text} - {res}p")
+            menu.add_separator()
+        if high_quality_video:
+            menu.add_command(label="--- High Quality Video ---", state="disabled")
+            for res, text in high_quality_video:
+                add_command(f"{text}")
+            menu.add_separator()
+        if medium_quality_video:
+            menu.add_command(label="--- Medium Quality Video ---", state="disabled")
+            for res, text in medium_quality_video:
+                add_command(f"{text}")
+            menu.add_separator()
+        if low_quality_video:
+            menu.add_command(label="--- Low Quality Video ---", state="disabled")
+            for res, text in low_quality_video:
+                add_command(f"{text}")
 
-                    if height and height != 'None' and isinstance(height, int):
-                        label = f"{height}p"
-                        if vcodec != 'none' and acodec != 'none':
-                            label += " (Combined)"
-                        elif vcodec != 'none':
-                            label += " (Video Only)"
-                        else:
-                            continue
-
-                        if height >= 1080:
-                            high_qualities_dynamic.append((height, label))
-                        elif 720 <= height < 1080:
-                            medium_qualities_dynamic.append((height, label))
-                        elif height < 720:
-                            low_qualities_dynamic.append((height, label))
-
-                high_qualities_dynamic.sort(key=lambda x: x[0], reverse=True)
-                medium_qualities_dynamic.sort(key=lambda x: x[0], reverse=True)
-                low_qualities_dynamic.sort(key=lambda x: x[0], reverse=True)
-
-                auto_option = [("Auto (Best available)", "Auto (Best available)")]
-
-                self.master.after(0, lambda: self._update_quality_options_grouped(
-                    auto_option,
-                    high_qualities_dynamic,
-                    medium_qualities_dynamic,
-                    low_qualities_dynamic,
-                    fixed_high_q,
-                    fixed_medium_q,
-                    fixed_low_q
-                ))
-            except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError,
-                    subprocess.TimeoutExpired) as e:
-                self.master.after(0, lambda: self._update_quality_options_grouped(
-                    [("Auto (Best available)", "Auto (Best available)")],
-                    [], [], [],
-                    fixed_high_q, fixed_medium_q, fixed_low_q,
-                    error_message="Error fetching qualities"
-                ))
-                print(f"Error fetching formats for {url}: {e}")
-            except Exception as e:
-                self.master.after(0, lambda: self._update_quality_options_grouped(
-                    [("Auto (Best available)", "Auto (Best available)")],
-                    [], [], [],
-                    fixed_high_q, fixed_medium_q, fixed_low_q,
-                    error_message="Unexpected error"
-                ))
-                print(f"Unexpected error fetching formats: {e}")
-
-        threading.Thread(target=_fetch_formats, daemon=True).start()
-
-    def _update_quality_options_grouped(self, auto_options, high_q_dynamic, medium_q_dynamic, low_q_dynamic,
-                                        high_q_fixed, medium_q_fixed, low_q_fixed, error_message=None):
-        """Updates the OptionMenu with new grouped quality options."""
-        current_selection = self.quality_var.get()
-
-        self.quality_menu['menu'].delete(0, 'end')
-
-        if error_message:
-            self.quality_menu['menu'].add_command(label=error_message, state="disabled")
-            self.quality_var.set(error_message)
-            return
-
-        for _, label in auto_options:
-            self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-
-        has_fixed_qualities = False
-        if high_q_fixed or medium_q_fixed or low_q_fixed:
-            has_fixed_qualities = True
-            self.quality_menu['menu'].add_separator()
-            self.quality_menu['menu'].add_command(label="--- Standard Qualities ---", state="disabled")
-
-            for _, label in high_q_fixed:
-                self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-            for _, label in medium_q_fixed:
-                self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-            for _, label in low_q_fixed:
-                self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-
-        if high_q_dynamic or medium_q_dynamic or low_q_dynamic:
-            if has_fixed_qualities:
-                self.quality_menu['menu'].add_separator()
-            self.quality_menu['menu'].add_command(label="--- Dynamic Qualities ---", state="disabled")
-
-            if high_q_dynamic:
-                self.quality_menu['menu'].add_command(label="High Qualities:", state="disabled")
-                for _, label in high_q_dynamic:
-                    self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-            if medium_q_dynamic:
-                self.quality_menu['menu'].add_command(label="Medium Qualities:", state="disabled")
-                for _, label in medium_q_dynamic:
-                    self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-            if low_q_dynamic:
-                self.quality_menu['menu'].add_command(label="Low Qualities:", state="disabled")
-                for _, label in low_q_dynamic:
-                    self.quality_menu['menu'].add_command(label=label, command=tk._setit(self.quality_var, label))
-
-        all_display_options = [label for _, label in auto_options] + \
-                              [label for _, label in high_q_fixed] + \
-                              [label for _, label in medium_q_fixed] + \
-                              [label for _, label in low_q_fixed] + \
-                              [label for _, label in high_q_dynamic] + \
-                              [label for _, label in medium_q_dynamic] + \
-                              [label for _, label in low_q_dynamic]
-
-        if current_selection in all_display_options:
-            self.quality_var.set(current_selection)
-        elif all_display_options:
-            self.quality_var.set(all_display_options[0])
-        else:
-            self.quality_var.set("No qualities found")
+        # Ensure a default is selected if the current one is no longer available
+        if self.quality_var.get() not in [item[0] for item in
+                                          auto + combined_video_audio + combined_audio_only + video_only + high_quality_video + medium_quality_video + low_quality_video]:
+            if auto:
+                self.quality_var.set(auto[0][0])
+            else:
+                self.quality_var.set("Auto (Best available)")  # Fallback
 
     def _process_queue_loop(self):
-        """Main loop for polling individual download item queues and managing concurrency."""
-        # Loop through active downloads to update their UI elements like elapsed time.
-        for item in list(self.active_downloads):
-            try:
-                while True:
-                    _ = item.output_queue.get_nowait()
-            except queue.Empty:
-                pass
-
-            if item.start_time:  # Only update if download has started
-                elapsed = time.time() - item.start_time
-                # Only update elapsed_time_label if it's still mapped to the screen (active item)
-                if item.elapsed_time_label.winfo_exists() and item.elapsed_time_label.winfo_ismapped():
-                    item.elapsed_time_label.config(text=f"Time: {item._format_seconds_to_dd_hh_mm_ss(elapsed)}")
-
-        # Keep processing queue if there are items or active downloads
-        if self.queued_downloads or self.active_downloads:
+        """Manages the download queue, starting new downloads as slots become free."""
+        active_count = len(self.active_downloads)
+        if self.queued_downloads and active_count < MAX_CONCURRENT_DOWNLOADS:
+            next_item = self.queued_downloads.pop(0)
+            self.active_downloads.append(next_item)
+            next_item.start_download()
             self.is_queue_processing_active = True
-            self._process_queue()
-        else:
+            self.all_downloads_completed.clear()  # Clear the event when downloads are active
+            self._set_status(f"Starting download for {next_item.video_title}...", COLOR_STATUS_PROGRESS)
+        elif not self.active_downloads and not self.queued_downloads and self.is_queue_processing_active:
+            # All downloads are finished
             self.is_queue_processing_active = False
-            # Only update status bar to "Ready" if nothing is pending and no completion alert is due
-            if self.status_bar.cget("text") != "All downloads complete!":
-                self._set_status("Ready", COLOR_STATUS_READY)
+            self.all_downloads_completed.set()  # Set the event when all downloads are completed
 
-        self.master.after(100, self._process_queue_loop)
+            if self.alert_on_completion_for_session and self.total_downloads_added > 0:
+                messagebox.showinfo("Downloads Complete",
+                                    f"All {self.completed_downloads_count} downloads finished!")
+                self.alert_on_completion_for_session = False
+                self.completed_downloads_count = 0
+                self.total_downloads_added = 0
+            self._set_status("All downloads finished. Ready.", COLOR_STATUS_COMPLETE)
+        self.master.after(1000, self._process_queue_loop)  # Check again after 1 second
 
-    def _process_queue(self):
-        """
-        Checks for available slots, handles file conflicts, and starts downloads from the queue.
-        This method is called repeatedly by the main loop.
-        """
-        self.is_queue_processing_active = True
+    def download_finished(self, item, final_status):
+        """Called by a DownloadItem when its download process completes (success/fail/abort)."""
+        if item in self.active_downloads:
+            self.active_downloads.remove(item)
 
-        # Iterate over a copy of queued_downloads so we can modify the original list
-        for i, next_item in enumerate(list(self.queued_downloads)):
-            if len(self.active_downloads) >= MAX_CONCURRENT_DOWNLOADS:
-                break
-
-                # Only process items where filename is explicitly provided OR title has been fetched
-            if not next_item.filename_provided_by_user and not next_item.is_title_fetched:
-                continue
-
-            # Determine the expected file extension based on mp3_conversion
-            expected_ext = ".mp3" if next_item.mp3_conversion else ".mp4"
-
-            # Calculate the full expected file path (assuming yt-dlp output naming conventions)
-            downloads_path = os.path.join(os.getcwd(), DOWNLOADS_DIR)
-            proposed_filepath = os.path.join(downloads_path, next_item.filename + expected_ext)
-
-            if os.path.exists(proposed_filepath):
-                # File conflict detected, show dialog
-                self._set_status(f"File '{os.path.basename(proposed_filepath)}' already exists. Awaiting user choice.",
-                                 "orange")
-                # Remove from queued_downloads immediately to avoid re-processing in the loop
-                self.queued_downloads.remove(next_item)
-                self._show_file_conflict_dialog(next_item, proposed_filepath)
-                return
-            else:
-                # No conflict, proceed with download
-                self.queued_downloads.remove(next_item)
-                self.active_downloads.append(next_item)
-                next_item.start_download()  # This will call _refresh_display_order
-                display_title = next_item.video_title if next_item.video_title != 'Fetching Title...' else next_item.url
-                self._set_status(
-                    f"Starting download for '{display_title[:40]}...'. Active: {len(self.active_downloads)}",
-                    COLOR_STATUS_PROGRESS)
-                self._update_queue_control_buttons()
-
-    def _show_file_conflict_dialog(self, download_item, existing_filepath):
-        """
-        Displays a custom dialog for file conflict resolution.
-        Options: Overwrite, Keep Both, Cancel.
-        """
-        dialog = tk.Toplevel(self.master)
-        dialog.title("File Exists")
-        dialog.transient(self.master)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        filename_display = os.path.basename(existing_filepath)
-
-        tk.Label(dialog, text=f"The file '{filename_display}' already exists.\nWhat would you like to do?",
-                 font=MAIN_FONT, wraplength=300, justify="center", padx=10, pady=10).pack()
-
-        button_frame = tk.Frame(dialog, padx=10, pady=5)
-        button_frame.pack()
-
-        result = tk.StringVar(value="")
-
-        def on_choice(choice):
-            result.set(choice)
-            dialog.destroy()
-
-        tk.Button(button_frame, text="Overwrite", bg=COLOR_ABORT_BUTTON, fg="white", font=BOLD_FONT,
-                  command=lambda: on_choice("overwrite")).pack(side="left", padx=5, pady=5)
-        tk.Button(button_frame, text="Keep Both", bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT,
-                  command=lambda: on_choice("keep_both")).pack(side="left", padx=5, pady=5)
-        tk.Button(button_frame, text="Cancel", bg=COLOR_CLEAR_BUTTON, fg="black", font=BOLD_FONT,
-                  command=lambda: on_choice("cancel")).pack(side="left", padx=5, pady=5)
-
-        dialog.update_idletasks()
-        x = self.master.winfo_x() + (self.master.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.master.winfo_y() + (self.master.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{x}+{y}")
-
-        self.master.wait_window(dialog)
-
-        choice = result.get()
-        self._handle_file_conflict_choice(choice, download_item, existing_filepath)
-
-    def _handle_file_conflict_choice(self, choice, download_item, existing_filepath):
-        """Processes the user's choice from the file conflict dialog."""
-        if choice == "overwrite":
-            self.active_downloads.append(download_item)
-            download_item.start_download()
-            display_title = download_item.video_title if download_item.video_title != 'Fetching Title...' else download_item.url
-            self._set_status(f"Overwriting for '{display_title[:40]}...'. Active: {len(self.active_downloads)}",
-                             COLOR_STATUS_PROGRESS)
-        elif choice == "keep_both":
-            original_filename_no_ext, ext = os.path.splitext(os.path.basename(existing_filepath))
-
-            match = re.match(r"^(.*?)( \(\d+\))?$", original_filename_no_ext)
-            base_name_for_renaming = match.group(1) if match else original_filename_no_ext
-
-            new_filename = self._generate_unique_filename(base_name_for_renaming, download_item.mp3_conversion)
-            download_item.filename = new_filename
-
-            self.active_downloads.append(download_item)
-            download_item.start_download()
-            self._set_status(f"Starting download (renamed to '{new_filename}'). Active: {len(self.active_downloads)}",
-                             COLOR_STATUS_PROGRESS)
-        else:  # cancel
-            self.download_finished(download_item, 'aborted')
-
-        self._process_queue()
-
-    def _generate_unique_filename(self, base_name, is_mp3):
-        """Generates a unique filename by appending (n) if a file exists."""
-        downloads_path = os.path.join(os.getcwd(), DOWNLOADS_DIR)
-        ext = ".mp3" if is_mp3 else ".mp4"
-
-        test_filename = base_name
-        counter = 1
-        while os.path.exists(os.path.join(downloads_path, test_filename + ext)):
-            test_filename = f"{base_name} ({counter})"
-            counter += 1
-        return test_filename
-
-    def download_finished(self, item_obj, final_status):
-        """Callback from DownloadItem when it finishes (success, fail, abort)."""
-        if item_obj in self.active_downloads:
-            self.active_downloads.remove(item_obj)
-            self.completed_downloads_count += 1
-
-        item_obj.status = final_status
-        item_obj.date_completed = time.strftime("%m|%d|%Y - %I:%M%p")
-        if item_obj.start_time:
-            item_obj.elapsed_time_seconds = time.time() - item_obj.start_time
+        item.status = final_status
+        item.date_completed = time.strftime("%m|%d|%Y - %I:%M%p")
+        if item.start_time:
+            item.elapsed_time_seconds = int(time.time() - item.start_time)
         else:
-            item_obj.elapsed_time_seconds = 0
+            item.elapsed_time_seconds = 0
 
-            # Mark as not an active item anymore
-        item_obj.is_active_item = False
+        # Move item from active (or queued if it was aborted before starting) to finished display
+        # First remove it from download_items_map if it was just a temporary object for queue (shouldn't happen with current flow)
+        # Add it to finished_downloads_data (for saving history)
+        self.finished_downloads_data.insert(0, self._get_item_data_for_history(item))  # Add to top of history
+        self._save_downloads_to_local_history()  # Save after each completion
 
-        # Add to local history (inserts at the beginning for newest-on-top)
-        self._add_to_local_history(item_obj)
+        # Update counter if completed successfully
+        if final_status == "completed":
+            self.completed_downloads_count += 1
+            self._set_status(f"Download for '{item.video_title}' completed!", COLOR_STATUS_COMPLETE)
+        elif final_status == "aborted":
+            self._set_status(f"Download for '{item.video_title}' aborted.", COLOR_STATUS_ABORTED)
+        else:
+            self._set_status(f"Download for '{item.video_title}' failed.", COLOR_STATUS_FAILED)
 
-        # Refresh the entire display to re-sort all items
+        # Rebuild/refresh the display to move completed item to history section
         self._refresh_display_order()
 
-        self._update_queue_control_buttons()
-        self._process_queue()
-
-        # Check if all downloads for this session are complete and alert is due
-        if not self.active_downloads and not self.queued_downloads:
-            if self.alert_on_completion_for_session and not self.all_downloads_completed.is_set():
-                self.all_downloads_completed.set()
-                self._show_overall_completion_alert()
-                self.alert_on_completion_for_session = False  # Reset for next batch of downloads
-
-    def _add_to_local_history(self, item_obj):
-        """Adds a finished download item to the local history list and saves to file."""
-        history_entry = {
-            'id': item_obj.item_id,
-            'url': item_obj.url,
-            'video_title': item_obj.video_title,
-            'filename': item_obj.filename,
-            'date_completed': item_obj.date_completed,
-            'status': item_obj.status,
-            'date_added': item_obj.date_added,
-            'filename_provided_by_user': item_obj.filename_provided_by_user,
-            'elapsed_time_seconds': item_obj.elapsed_time_seconds
-        }
-        self.finished_downloads_data.insert(0, history_entry)
-        self._save_downloads_to_local_history()
-
-    def _load_downloads_from_local_history(self):
-        """Loads download history from a local JSON file."""
-        if not os.path.exists(HISTORY_FILE):
-            self.finished_downloads_data = []
-            return
-
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                loaded_data = json.load(f)
-                # Ensure each loaded item is instantiated as DownloadItem and added to the map
-                for item_data in loaded_data:
-                    item_obj = DownloadItem(self, item_data,
-                                            is_active_item=False)  # These are historical, so not active
-                    self.download_items_map[item_obj.item_id] = item_obj
-                self.finished_downloads_data = loaded_data  # Keep raw data for saving
-
-            self._refresh_display_order()  # Populate display
-            self._set_status(f"Loaded {len(self.finished_downloads_data)} finished downloads from history.",
-                             COLOR_STATUS_READY)
-
-        except json.JSONDecodeError as e:
-            messagebox.showwarning("History Load Error", f"Could not read download history (corrupted JSON?): {e}")
-            self.finished_downloads_data = []
-        except Exception as e:
-            messagebox.showerror("History Load Error", f"An error occurred loading history: {e}")
-            self.finished_downloads_data = []
-
-    def _save_downloads_to_local_history(self):
-        """Saves the current finished downloads list to a local JSON file."""
-        try:
-            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.finished_downloads_data, f, indent=4)
-        except Exception as e:
-            messagebox.showerror("History Save Error", f"Failed to save download history: {e}")
-
-    def remove_from_queue(self, item_obj):
-        """Removes a pending download item from the queue if aborted before starting."""
-        if item_obj in self.queued_downloads:
-            self.queued_downloads.remove(item_obj)
-            self.download_finished(item_obj, 'aborted')
-
-        self._update_queue_control_buttons()
+    def remove_from_queue(self, item_to_remove):
+        """Removes a specified item from the queued_downloads list."""
+        if item_to_remove in self.queued_downloads:
+            self.queued_downloads.remove(item_to_remove)
+            self.download_items_map.pop(item_to_remove.item_id, None)  # Remove from map
+            self._refresh_display_order()
+            self._set_status(f"Removed '{item_to_remove.video_title}' from queue.", COLOR_STATUS_READY)
 
     def _clear_queue(self):
-        """Clears all pending downloads from the queue and resets the UI."""
-        if not self.active_downloads and not self.queued_downloads:
-            messagebox.showinfo("Clear Queue", "The download queue is already empty.")
-            return
-
-        if not messagebox.askyesno("Clear Queue",
-                                   "Are you sure you want to clear the entire download queue (including active and pending downloads)?"):
-            return
-
-        # Abort active downloads first
-        for item in list(self.active_downloads):
-            item.abort_download()
-
-            # Cancel queued downloads (not yet active)
-        for item in list(self.queued_downloads):
-            # No process to kill for queued items, just mark as cancelled
-            if item.item_id in self.download_items_map:
-                # Ensure the item is properly moved to history with cancelled status
-                self.download_finished(item, 'cancelled')
-
+        """Clears all items from the active and queued downloads."""
+        for item in self.active_downloads[:]:
+            item.abort_download()  # Abort any active downloads
         self.queued_downloads.clear()
+        self.active_downloads.clear()
+        # Remove active items from the map
+        ids_to_remove = [item.item_id for item in self.download_items_map.values() if item.is_active_item]
+        for item_id in ids_to_remove:
+            self.download_items_map.pop(item_id, None)
 
-        self.total_downloads_added = 0
-        self.completed_downloads_count = 0
-        self.is_queue_processing_active = False
-        self.all_downloads_completed.set()
-        self.alert_on_completion_for_session = False  # No alert after clearing
-
-        self._set_status("Queue cleared. All active/queued downloads aborted/cancelled.", COLOR_STATUS_ABORTED)
-        self._update_queue_control_buttons()
-        self._refresh_display_order()  # Refresh display to remove cancelled items
+        self._refresh_display_order()
+        self._set_status("Download queue cleared.", COLOR_STATUS_READY)
+        messagebox.showinfo("Queue Cleared", "All pending downloads have been cleared.")
 
     def _clear_finished_history(self):
         """Clears all items from the finished downloads history."""
-        if not self.finished_downloads_data and not self.downloads_frame_inner.winfo_children():
-            messagebox.showinfo("Clear History", "Finished downloads history is already empty.")
-            return
-
-        if messagebox.askyesno("Clear History",
-                               "Are you sure you want to clear ALL finished download history? This cannot be undone."):
-            # Clear the in-memory list
+        if messagebox.askyesno("Clear History", "Are you sure you want to clear all download history? "
+                                                "This will not delete the actual downloaded files."):
             self.finished_downloads_data.clear()
+            # Also remove finished items from the map
+            ids_to_remove = [item.item_id for item in self.download_items_map.values() if not item.is_active_item]
+            for item_id in ids_to_remove:
+                self.download_items_map.pop(item_id, None)
 
-            # Remove finished items from the overall map
-            keys_to_remove = [item_id for item_id, item_obj in self.download_items_map.items() if
-                              not item_obj.is_active_item]
-            for key in keys_to_remove:
-                del self.download_items_map[key]
-
-            self._save_downloads_to_local_history()  # Save empty list to file
-            self._refresh_display_order()  # Refresh display to remove history items
-
-            self._set_status("Finished downloads history cleared.", COLOR_STATUS_READY)
-            messagebox.showinfo("History Cleared", "All finished download history has been cleared.")
-
-    def _update_queue_control_buttons(self, event=None):
-        """Enables/disables queue control buttons based on queue/active status."""
-        clear_enabled = bool(self.queued_downloads) or bool(self.active_downloads)
-
-        self.clear_queue_button.config(state="normal" if clear_enabled else "disabled")
-
-    def _show_overall_completion_alert(self):
-        """Shows a single alert when all downloads are finished."""
-        messagebox.showinfo("All Downloads Complete", "All items in the queue have finished downloading!")
-        pass
+            self._save_downloads_to_local_history()
+            self._refresh_display_order()
+            self._set_status("Download history cleared.", COLOR_STATUS_READY)
 
     def _refresh_display_order(self):
-        """Refreshes the display of all download items based on their status and order."""
-        # 1. Destroy existing widgets in the display frame
+        """
+        Destroys and recreates all download item frames to ensure correct order
+        and visibility (active vs. history).
+        """
+        # Clear existing widgets from the inner frame
         for widget in self.downloads_frame_inner.winfo_children():
             widget.destroy()
 
-        # 2. Prepare all items for display
+        # 1. Prepare lists of displayable items
         all_display_items = []
-        # Add active items
-        for item_obj in self.active_downloads:
-            all_display_items.append(item_obj)
-        # Add queued items
-        for item_obj in self.queued_downloads:
-            all_display_items.append(item_obj)
+        seen_ids = set()
 
-        # Add finished/aborted/cancelled items (from history data)
-        # Re-instantiate DownloadItem objects from history data to ensure fresh UI elements
-        # (This avoids issues if a DownloadItem object was destroyed from an old parent frame
-        # but its data still exists in finished_downloads_data)
+        for item in self.active_downloads:
+            if item.item_id not in seen_ids:
+                all_display_items.append(item)
+                seen_ids.add(item.item_id)
+        for item in self.queued_downloads:
+            if item.item_id not in seen_ids:
+                all_display_items.append(item)
+                seen_ids.add(item.item_id)
         for item_data in self.finished_downloads_data:
-            # Retrieve the existing DownloadItem object if it's already in the map,
-            # otherwise create a new one (e.g., if loaded from history file for first time).
-            # This is to ensure we don't duplicate DownloadItem objects if they are already active/queued.
-            if item_data['id'] not in self.download_items_map:
-                # This case should ideally not happen if download_items_map always holds all
-                # items, but as a safeguard.
-                item_obj = DownloadItem(self, item_data, is_active_item=False)
-                self.download_items_map[item_obj.item_id] = item_obj
-            else:
-                item_obj = self.download_items_map[item_data['id']]
-                item_obj.is_active_item = False  # Ensure it's marked as non-active for display purposes
-            all_display_items.append(item_obj)
+            if item_data['id'] not in seen_ids:
+                item_obj = self.download_items_map.get(item_data['id'])
+                if item_obj:
+                    item_obj.is_active_item = False
+                else:
+                    item_obj = DownloadItem(self, item_data, is_active_item=False)
+                    self.download_items_map[item_data['id']] = item_obj
+                all_display_items.append(item_obj)
+                seen_ids.add(item_data['id'])
 
-        # 3. Sort items for display: Active first, then finished (newest first)
+        # 3. Sort items for display: active/queued first (by date added), then finished (newest completed first)
         def sort_key(item):
-            # Active items (True for is_active_item) come first (False for reverse sorting)
-            active_sort = not item.is_active_item
+            # Active/queued items appear first
+            active_sort = 0 if item.is_active_item else 1
+            time_sort = 0
 
-            # For finished items, sort by date_completed descending (newest first)
-            # Use a safe default for date conversion if date_completed is not available or "N/A"
-            if not item.is_active_item and item.date_completed != 'N/A':
+            if item.is_active_item:
+                try:
+                    # Convert "MM|DD|YYYY - H:MMpm" to a comparable timestamp
+                    date_obj = time.strptime(item.date_added, "%m|%d|%Y - %I:%M%p")
+                    time_sort = -time.mktime(date_obj)  # Negative for descending order (newest first)
+                except ValueError:
+                    time_sort = -time.time()  # Fallback to current time if date format is unexpected
+            elif item.date_completed != 'N/A':
                 try:
                     # Convert "MM|DD|YYYY - H:MMpm" to a comparable timestamp
                     date_obj = time.strptime(item.date_completed, "%m|%d|%Y - %I:%M%p")
@@ -1399,10 +1120,103 @@ class YTDLPGUIApp:
 
         # 5. Update canvas scroll region
         self.downloads_frame_inner.update_idletasks()
-        self.downloads_canvas.config(scrollregion=self.downloads_canvas.bbox("all"))
+        self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
+
+    def _get_item_data_for_history(self, item_obj):
+        """Prepares a dictionary of item data for saving to history."""
+        return {
+            'id': item_obj.item_id,
+            'url': item_obj.url,
+            'quality': item_obj.quality,
+            'filename': item_obj.filename,
+            'mp3_conversion': item_obj.mp3_conversion,
+            'source': item_obj.source,
+            'referer': item_obj.referer,
+            'video_title': item_obj.video_title,
+            'status': item_obj.status,
+            'date_added': item_obj.date_added,
+            'date_completed': item_obj.date_completed,
+            'filename_provided_by_user': item_obj.filename_provided_by_user,
+            'elapsed_time_seconds': item_obj.elapsed_time_seconds
+        }
+
+    def _save_downloads_to_local_history(self):
+        """Saves the current finished_downloads_data to a local JSON file."""
+        # Only save finished items
+        history_to_save = [
+            self._get_item_data_for_history(item)
+            for item in self.download_items_map.values()
+            if not item.is_active_item
+        ]
+        history_to_save.sort(key=lambda x: time.mktime(time.strptime(x['date_completed'], "%m|%d|%Y - %I:%M%p")) if x[
+                                                                                                                        'date_completed'] != 'N/A' else time.time(),
+                             reverse=True)
+
+        try:
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(history_to_save, f, indent=4)
+        except IOError as e:
+            print(f"Error saving history: {e}")
+
+    def _load_downloads_from_local_history(self):
+        """Loads download history from a local JSON file on startup."""
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    loaded_history = json.load(f)
+                    # Initialize download_item_counter to be greater than any loaded ID
+                    if loaded_history:
+                        self.download_item_counter = max(item['id'] for item in loaded_history) + 1
+                    else:
+                        self.download_item_counter = 0
+
+                    for item_data in loaded_history:
+                        # Ensure loaded items are marked as finished and not active
+                        item_data['status'] = item_data.get('status',
+                                                            'completed')  # Default to completed if status missing
+                        # If a completed item was in active_downloads during a crash, ensure its temp_dir is cleaned up
+                        temp_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(item_data['id']))
+                        if os.path.exists(temp_path):
+                            shutil.rmtree(temp_path, ignore_errors=True)
+
+                        history_item = DownloadItem(self, item_data, is_active_item=False)
+                        # We are no longer adding to finished_downloads_data directly here,
+                        # as _refresh_display_order will re-populate it from self.download_items_map
+                        self.download_items_map[item_data['id']] = history_item  # Store object in map
+
+                self._refresh_display_order()  # Display loaded history
+            except (IOError, json.JSONDecodeError) as e:
+                print(f"Error loading history: {e}")
+                messagebox.showwarning("History Load Error",
+                                       f"Could not load download history. It might be corrupted or missing: {e}")
+        else:
+            self.download_item_counter = 0  # Start counter from 0 if no history file
+
+    def _cleanup_temp_directories_on_launch(self):
+        """
+        Cleans up any lingering temporary download directories from previous sessions
+        upon application launch.
+        """
+        full_temp_dir_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR)
+        if os.path.exists(full_temp_dir_path):
+            print(f"Checking for lingering temporary directories in: {full_temp_dir_path}")
+            for entry in os.listdir(full_temp_dir_path):
+                entry_path = os.path.join(full_temp_dir_path, entry)
+                if os.path.isdir(entry_path):
+                    try:
+                        print(f"Deleting lingering temporary directory: {entry_path}")
+                        shutil.rmtree(entry_path)
+                    except Exception as e:
+                        print(f"Error deleting lingering temporary directory {entry_path}: {e}")
+        else:
+            print(f"Temporary directory not found: {full_temp_dir_path}. No cleanup needed.")
 
 
-if __name__ == "__main__":
+def main():
     root = tk.Tk()
     app = YTDLPGUIApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
