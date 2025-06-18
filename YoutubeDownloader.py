@@ -24,7 +24,6 @@ COLOR_ABORT_BUTTON = "#DC3545"  # Red
 COLOR_CLEAR_BUTTON = "#FFC107"  # Yellow-Orange
 COLOR_OPEN_FOLDER_BUTTON = "#6C757D"  # Grey/Dark grey
 COLOR_OPEN_FILE_BUTTON = "#17A2B8"  # Info Blue/Cyan
-# COLOR_TOGGLE_LOG_BUTTON = "#6F42C1" # Purple - Removed as per user request
 
 COLOR_STATUS_READY = "black"
 COLOR_STATUS_PROGRESS = "#007BFF"  # Blue
@@ -45,8 +44,8 @@ class DownloadItem:
     Can represent an active/queued download or a finished history item.
     """
 
-    def __init__(self, parent_frame, app_instance, item_data, is_active_tab=True):
-        self.parent_frame = parent_frame
+    def __init__(self, app_instance, item_data, is_active_item=True):
+        self.parent_frame = None  # Will be set dynamically during _refresh_display_order
         self.app_instance = app_instance
 
         # Load data from item_data dictionary
@@ -58,7 +57,8 @@ class DownloadItem:
         self.source = item_data.get('source', 'N/A')
         self.referer = item_data.get('referer', '')
         self.video_title = item_data.get('video_title', 'Fetching Title...')
-        self.status = item_data.get('status', 'queued')  # "queued", "active", "completed", "failed", "aborted"
+        self.status = item_data.get('status',
+                                    'queued')  # "queued", "active", "completed", "failed", "aborted", "cancelled"
         self.date_added = item_data.get('date_added', 'N/A')  # New: Date added
         self.date_completed = item_data.get('date_completed', 'N/A')  # Only for finished items
         # New: Track if filename was provided by user or auto-generated
@@ -67,8 +67,6 @@ class DownloadItem:
         self.elapsed_time_seconds = item_data.get('elapsed_time_seconds', 0)
 
         # Flag to indicate if the video title has been successfully fetched
-        # If filename was provided by user, or if loading from history (title is already there),
-        # then title is considered fetched.
         self.is_title_fetched = self.filename_provided_by_user or (self.video_title != 'Fetching Title...')
 
         self.process = None
@@ -77,44 +75,30 @@ class DownloadItem:
         self.last_update_time = None  # For live elapsed time display on active downloads
         self.is_aborted = False
         self.is_merging = False  # Flag to track merging/conversion phase
-        self.is_active_tab = is_active_tab  # Flag to determine which tab the item belongs to (for UI placement)
+        # This flag now determines the *layout* of the item, not its tab parent
+        self.is_active_item = is_active_item
 
-        self._create_widgets()
+        self.frame = None  # Will be created in _build_frame_widgets
+
+        # If loading from history, status is already set. If new, it's 'queued'.
         self.update_status(self.status, self._get_status_color(self.status))
         self._update_title_label()  # Ensure title is set correctly on init
 
         # For new items (added via UI), fetch title. For loaded history, title is already there.
-        # Only fetch title if not explicitly provided by user AND it's a new/queued item
-        if self.is_active_tab and not self.filename_provided_by_user and not self.is_title_fetched:
+        if self.is_active_item and not self.filename_provided_by_user and not self.is_title_fetched:
             self.fetch_title_async()
-        elif self.status != 'queued':  # For finished items, set progress based on final state
-            if self.status == 'completed':
-                self.progress_bar.config(value=100, mode="determinate")
-            else:
-                self.progress_bar.config(value=0, mode="determinate")
-            # For finished items, ensure abort button is not visible or disabled
-            if hasattr(self, 'abort_button'):
-                self.abort_button.config(state="disabled")  # Disabled for clarity if visible
 
-    def _create_widgets(self):
-        """Creates the UI elements for this individual download item."""
-        # Use grid for flexible and compact layout
-        # Column 0: Title/URL (grows)
-        # Column 1: Progress Bar / Status / Date Added (fixed size)
-        # Column 2: Elapsed Time / Abort Button / Date Completed (fixed size)
-        # Column 3: Open File Button (fixed size, only for finished)
-
-        # Destroy existing frame if it was already packed
-        if hasattr(self, 'frame') and self.frame.winfo_exists():
+    def _build_frame_widgets(self):
+        """Builds or rebuilds the UI elements for this individual download item."""
+        # Destroy existing frame if it exists and needs to be rebuilt
+        if self.frame and self.frame.winfo_exists():
             self.frame.destroy()
 
         self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=5, pady=5, bg="#f0f0f0")
         self.frame.columnconfigure(0, weight=1)
         self.frame.columnconfigure(1, weight=0)
         self.frame.columnconfigure(2, weight=0)
-        self.frame.columnconfigure(3, weight=0)  # Added for the Open File button
-        # Use pack with expand=True and fill="x" to ensure it fills parent
-        self.frame.pack(fill="x", padx=5, pady=3, expand=True)
+        self.frame.columnconfigure(3, weight=0)
 
         # Common Labels
         self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", wraplength=400,
@@ -129,17 +113,17 @@ class DownloadItem:
                                              anchor="w", bg="#f0f0f0")
         self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="e", bg="#f0f0f0")
 
-        # Active Tab Specific Widgets
+        # Active Item Specific Widgets
         self.progress_bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate")
         self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
                                       fg="white", font=SMALL_FONT)
 
-        # Finished Tab Specific Widgets
+        # Finished Item Specific Widgets
         self.open_file_button = tk.Button(self.frame, text="Open File", command=self._open_file_location,
                                           bg=COLOR_OPEN_FILE_BUTTON, fg="white", font=SMALL_FONT)
 
-        if self.is_active_tab:
-            # Active Tab Layout
+        if self.is_active_item:
+            # Active Item Layout
             self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
             self.date_added_label.grid(row=0, column=1, sticky="ne", padx=2, pady=0)
             self.progress_bar.grid(row=1, column=0, sticky="ew", padx=2, pady=0)
@@ -147,24 +131,36 @@ class DownloadItem:
             self.elapsed_time_label.grid(row=1, column=2, sticky="e", padx=2, pady=0)
             self.abort_button.grid(row=1, column=3, sticky="e", padx=2, pady=0)
 
-            # Hide finished-tab-only widgets
+            # Ensure finished-item-only widgets are not displayed
             self.url_label.grid_forget()
             self.date_completed_label.grid_forget()
             self.open_file_button.grid_forget()
-        else:
-            # Finished Tab Layout
+        else:  # This item is a finished item (completed, failed, aborted, cancelled)
+            # Finished Item Layout
             self.title_label.grid(row=0, column=0, columnspan=4, sticky="nw", padx=2, pady=0)
             self.url_label.grid(row=1, column=0, columnspan=4, sticky="nw", padx=2, pady=0)
             self.status_label.grid(row=2, column=0, sticky="w", padx=2, pady=0)
             self.date_added_label.grid(row=2, column=1, sticky="w", padx=2, pady=0)
             self.date_completed_label.grid(row=2, column=2, sticky="e", padx=2, pady=0)
-            self.elapsed_time_label.grid(row=2, column=2, sticky="w", padx=2,
-                                         pady=0)  # Display elapsed time for history
+            self.elapsed_time_label.grid(row=2, column=2, sticky="w", padx=2, pady=0)
             self.open_file_button.grid(row=2, column=3, sticky="e", padx=2, pady=0)
 
-            # Hide active-tab-only widgets
+            # Ensure active-item-only widgets are not displayed
             self.progress_bar.grid_forget()
             self.abort_button.grid_forget()
+
+            # Set progress bar to 100% for completed, 0% for others in history
+            if self.status == 'completed':
+                self.progress_bar.config(value=100, mode="determinate")
+            else:
+                self.progress_bar.config(value=0, mode="determinate")
+            # For finished items, ensure abort button is disabled (should already be hidden anyway)
+            if hasattr(self, 'abort_button') and self.abort_button.winfo_exists():
+                self.abort_button.config(state="disabled")
+
+        # Update labels with current item data
+        self._update_title_label()
+        self.update_status(self.status, self._get_status_color(self.status))
 
     def _get_status_color(self, status_text):
         """Returns the color based on status text."""
@@ -172,7 +168,7 @@ class DownloadItem:
             return COLOR_STATUS_READY
         elif "Downloading" in status_text or "Converting" in status_text or status_text == "active":
             return COLOR_STATUS_PROGRESS
-        elif status_text == "completed":  # Use "completed" for internal logic
+        elif status_text == "completed":
             return COLOR_STATUS_COMPLETE
         elif status_text == "failed":
             return COLOR_STATUS_FAILED
@@ -187,7 +183,7 @@ class DownloadItem:
         Else, returns HH|MM|SS.
         """
         if total_seconds < 0:
-            total_seconds = 0  # Handle negative values, though should not happen for elapsed time
+            total_seconds = 0
 
         days = int(total_seconds // (24 * 3600))
         remaining_seconds = total_seconds % (24 * 3600)
@@ -221,44 +217,44 @@ class DownloadItem:
                 metadata = json.loads(result.stdout)
                 self.video_title = metadata.get('title', 'Unknown Title')
 
-                # IMPORTANT FIX: If filename was NOT explicitly set by user, update it with the fetched title
+                # If filename was NOT explicitly set by user, update it with the fetched title
                 if not self.filename_provided_by_user:
                     sanitized_title = re.sub(r'[\\/:*?"<>|]', '', self.video_title)
                     self.filename = sanitized_title
 
-                self.is_title_fetched = True  # Title fetched successfully
-                self.app_instance.master.after(0, self._update_title_label)
+                self.is_title_fetched = True
+                self.app_instance.master.after(0, self.app_instance._refresh_display_order)  # Refresh entire display
 
             except FileNotFoundError:
                 self.video_title = "Error: yt-dlp.exe not found."
-                if not self.filename_provided_by_user:  # Only fallback if not user-provided
+                if not self.filename_provided_by_user:
                     self.filename = self.url.split('/')[-1].split('?')[0][:50]
-                self.is_title_fetched = False  # Mark as not fetched due to error
-                self.app_instance.master.after(0, self._update_title_label)
+                self.is_title_fetched = False
+                self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
                 print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for URL: {self.url}")
             except subprocess.CalledProcessError as e:
                 self.video_title = f"Error fetching title: Command failed. {e.stderr.strip()}"
-                if not self.filename_provided_by_user:  # Only fallback if not user-provided
+                if not self.filename_provided_by_user:
                     self.filename = self.url.split('/')[-1].split('?')[0][:50]
-                self.is_title_fetched = False  # Mark as not fetched due to error
-                self.app_instance.master.after(0, self._update_title_label)
+                self.is_title_fetched = False
+                self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
                 print(f"subprocess.CalledProcessError for URL {self.url}: {e.stderr.strip()}")
             except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
                 self.video_title = f"Error fetching title: {e}"
-                if not self.filename_provided_by_user:  # Only fallback if not user-provided
+                if not self.filename_provided_by_user:
                     self.filename = self.url.split('/')[-1].split('?')[0][:50]
-                self.is_title_fetched = False  # Mark as not fetched due to error
-                self.app_instance.master.after(0, self._update_title_label)
+                self.is_title_fetched = False
+                self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
                 print(f"Decoding/Timeout Error for URL {self.url}: {e}")
             except Exception as e:
                 self.video_title = f"Unexpected error fetching title: {e}"
-                if not self.filename_provided_by_user:  # Only fallback if not user-provided
+                if not self.filename_provided_by_user:
                     self.filename = self.url.split('/')[-1].split('?')[0][:50]
-                self.is_title_fetched = False  # Mark as not fetched due to error
-                self.app_instance.master.after(0, self._update_title_label)
+                self.is_title_fetched = False
+                self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
                 print(f"General Error fetching title for URL {self.url}: {e}")
 
@@ -268,23 +264,19 @@ class DownloadItem:
         """Updates the title label on the UI with the fetched title."""
         display_name = self.video_title if self.video_title and self.video_title != 'Fetching Title...' else (
             os.path.basename(self.filename) if self.filename else self.url)
-        if len(display_name) > 60:  # Smaller clip for title to make space
+        if len(display_name) > 60:
             display_name = display_name[:57] + "..."
 
-        if self.is_active_tab:
-            self.title_label.config(text=f"{display_name} ({self.source})")
-            self.date_added_label.config(text=f"Added: {self.date_added}")
-            # Live elapsed time update is handled in _parse_output_for_progress and _process_queue_loop
-        else:  # Finished tab display
-            # Update labels based on finished item structure
-            self.title_label.config(text=f"Title: {display_name}")
+        # Labels are dynamically configured by _build_frame_widgets based on is_active_item
+        # This function just updates the text content of the labels that are currently visible
+        self.title_label.config(text=f"{display_name} ({self.source})")
+        self.date_added_label.config(text=f"Added: {self.date_added}")
 
+        if not self.is_active_item:
             display_url = self.url
-            if len(display_url) > 70:  # Clip URL for display
+            if len(display_url) > 70:
                 display_url = display_url[:67] + "..."
             self.url_label.config(text=f"URL: {display_url}")
-
-            self.date_added_label.config(text=f"Added: {self.date_added}")
             self.date_completed_label.config(text=f"Completed: {self.date_completed}")
             self.elapsed_time_label.config(
                 text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds)}")
@@ -295,7 +287,11 @@ class DownloadItem:
         self.is_merging = False
         self.start_time = time.time()  # Record start time
         self.last_update_time = time.time()  # Reset last update time for live display
-        self.update_status("active", COLOR_STATUS_PROGRESS)  # Update status to 'active'
+        self.update_status("active", COLOR_STATUS_PROGRESS)
+        # Re-build and re-pack to ensure active item layout
+        self.is_active_item = True
+        self.app_instance._refresh_display_order()
+
         self.abort_button.config(state="normal")
         self.progress_bar.config(value=0)
         self.progress_bar.config(mode="determinate")
@@ -318,7 +314,7 @@ class DownloadItem:
         os.makedirs(temp_dir, exist_ok=True)
         command += ["--paths", f"temp:{temp_dir}"]
 
-        out_name = self.filename  # This is the resolved filename
+        out_name = self.filename
 
         if self.mp3_conversion:
             command += ["--extract-audio", "--audio-format", "mp3", "--output",
@@ -366,8 +362,10 @@ class DownloadItem:
                 # Update elapsed time live
                 if self.start_time:  # Only update if download has started
                     elapsed = time.time() - self.start_time
-                    self.app_instance.master.after(0, lambda e=elapsed: self.elapsed_time_label.config(
-                        text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(e)}"))
+                    # Only update elapsed_time_label if it's still mapped to the screen (active item)
+                    if self.elapsed_time_label.winfo_exists() and self.elapsed_time_label.winfo_ismapped():
+                        self.app_instance.master.after(0, lambda e=elapsed: self.elapsed_time_label.config(
+                            text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(e)}"))
 
             rc = self.process.wait()
             # Stop indeterminate progress bar if it was running
@@ -387,7 +385,7 @@ class DownloadItem:
 
         except FileNotFoundError:
             final_status = "failed"
-            self.update_status("failed", COLOR_STATUS_FAILED)  # Use internal status names
+            self.update_status("failed", COLOR_STATUS_FAILED)
             if self.app_instance.log_window_visible and self.app_instance.log_text:
                 self.app_instance.master.after(0, lambda: self._append_to_log(
                     "ERROR: yt-dlp.exe not found or not in PATH.\n"))
@@ -400,7 +398,8 @@ class DownloadItem:
             print(f"Error during yt-dlp execution for URL {self.url}: {e}")
         finally:
             self.process = None
-            self.abort_button.config(state="disabled")
+            if self.abort_button.winfo_exists():  # Check if button exists before trying to configure
+                self.abort_button.config(state="disabled")
             temp_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(self.item_id))
             if os.path.exists(temp_path):
                 shutil.rmtree(temp_path, ignore_errors=True)
@@ -410,10 +409,10 @@ class DownloadItem:
     def _append_to_log(self, text):
         """Appends text to the log window's ScrolledText widget."""
         if self.app_instance.log_text and self.app_instance.log_window.winfo_exists():
-            self.app_instance.log_text.config(state=tk.NORMAL)  # Enable writing
+            self.app_instance.log_text.config(state=tk.NORMAL)
             self.app_instance.log_text.insert(END, text)
-            self.app_instance.log_text.see(END)  # Auto-scroll to the end
-            self.app_instance.log_text.config(state=tk.DISABLED)  # Disable writing
+            self.app_instance.log_text.see(END)
+            self.app_instance.log_text.config(state=tk.DISABLED)
 
     def _parse_output_for_progress(self, line):
         """Parses a line of yt-dlp output for progress, speed, and ETA."""
@@ -451,8 +450,10 @@ class DownloadItem:
 
     def update_status(self, text, color):
         """Updates the status label for this download item."""
-        self.status_label.config(text=text.capitalize(), fg=color)  # Capitalize for display
-        self.status = text  # Keep item's internal status updated
+        # Ensure the widget exists before trying to configure it
+        if self.status_label.winfo_exists():
+            self.status_label.config(text=text.capitalize(), fg=color)
+        self.status = text
 
     def abort_download(self):
         """Aborts the currently running download process."""
@@ -462,8 +463,9 @@ class DownloadItem:
                 self.process.kill()
                 self.update_status("aborted", COLOR_STATUS_ABORTED)
                 if self.is_merging:
-                    self.progress_bar.stop()
-                    self.progress_bar.config(mode="determinate")
+                    if self.progress_bar.winfo_exists():
+                        self.progress_bar.stop()
+                        self.progress_bar.config(mode="determinate")
             except Exception:
                 self.update_status("failed", COLOR_STATUS_FAILED)
         else:
@@ -482,14 +484,10 @@ class DownloadItem:
 
         try:
             if sys.platform == "win32":
-                # For Windows, use explorer.exe with /select,
-                # but it requires a path with forward slashes for some reason.
                 subprocess.Popen(f'explorer /select,"{full_filepath.replace("/", "\\")}"')
             elif sys.platform == "darwin":
-                # For macOS, use 'open -R' to reveal in Finder
                 subprocess.Popen(["open", "-R", full_filepath])
             else:
-                # For Linux/other Unix-like systems, use xdg-open
                 subprocess.Popen(["xdg-open", os.path.dirname(full_filepath)])
         except Exception as e:
             messagebox.showerror("Error", f"Could not open file location: {e}")
@@ -501,11 +499,11 @@ class YTDLPGUIApp:
         self._setup_window(master)
 
         self._configure_yt_dlp_path()
-        self._create_menus()  # New: Create menus
+        self._create_menus()
 
-        self._create_widgets()
+        self._create_widgets()  # This will now create the single combined view
         self._initialize_download_management()
-        self._load_downloads_from_local_history()  # Load history on startup
+        self._load_downloads_from_local_history()
 
         self.master.after(100, self._process_queue_loop)
         self.on_source_change(YOUTUBE_SOURCE)
@@ -517,7 +515,7 @@ class YTDLPGUIApp:
 
     def _setup_window(self, master):
         master.title("YouTube Downloader powered by yt-dlp")
-        master.geometry("800x650")  # Increased width for tabs
+        master.geometry("800x650")
         master.resizable(True, True)
         try:
             master.iconbitmap("ico.ico")
@@ -547,7 +545,6 @@ class YTDLPGUIApp:
         ffmpeg_version = "Not Found"
 
         try:
-            # yt-dlp version
             yt_dlp_result = subprocess.run([self.yt_dlp_path, "--version"], capture_output=True, text=True, check=True,
                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
                                            timeout=5)
@@ -556,13 +553,12 @@ class YTDLPGUIApp:
             pass
 
         try:
-            # ffmpeg version (yt-dlp automatically uses it for merging/conversion)
             ffmpeg_result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True,
                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
                                            timeout=5)
             ffmpeg_version_lines = ffmpeg_result.stdout.strip().split('\n')
             if ffmpeg_version_lines:
-                ffmpeg_version = ffmpeg_version_lines[0]  # Get the first line of ffmpeg output
+                ffmpeg_version = ffmpeg_version_lines[0]
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
@@ -582,23 +578,23 @@ class YTDLPGUIApp:
                 self.log_window = tk.Toplevel(self.master)
                 self.log_window.title("yt-dlp Process Log")
                 self.log_window.geometry("600x400")
-                self.log_window.protocol("WM_DELETE_WINDOW", self._on_log_window_close)  # Handle close button
+                self.log_window.protocol("WM_DELETE_WINDOW", self._on_log_window_close)
 
                 self.log_text = scrolledtext.ScrolledText(self.log_window, wrap=tk.WORD, font=MONO_FONT, bg="black",
                                                           fg="lightgreen", insertbackground="white")
                 self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
-                self.log_text.config(state=tk.DISABLED)  # Make it read-only
-            self.log_window.deiconify()  # Show the window
+                self.log_text.config(state=tk.DISABLED)
+            self.log_window.deiconify()
         else:
             if self.log_window and self.log_window.winfo_exists():
-                self.log_window.withdraw()  # Hide the window
+                self.log_window.withdraw()
 
     def _on_log_window_close(self):
         """Handles the log window close button, updating the toggle variable."""
         self.log_toggle_var.set(False)
         self.log_window_visible = False
         if self.log_window:
-            self.log_window.withdraw()  # Hide the window
+            self.log_window.withdraw()
 
     def _open_downloads_folder(self):
         """Opens the main downloads directory."""
@@ -637,18 +633,18 @@ class YTDLPGUIApp:
                                                                        pady=2)
         self.url_entry = tk.Entry(input_frame, font=MAIN_FONT)
         self.url_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
-        self.url_entry.bind("<Return>", self._add_to_queue_on_enter)  # Binding
+        self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
         self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
 
         # Fixed row index for quality controls
         self.QUALITY_ROW_IDX = row_idx + 1
         self.quality_label = tk.Label(input_frame, text="Quality:", font=MAIN_FONT)
         self.quality_var = tk.StringVar(value="Auto (Best available)")
-        self.quality_menu = tk.OptionMenu(input_frame, self.quality_var, "Auto (Best available)")  # Placeholder
+        self.quality_menu = tk.OptionMenu(input_frame, self.quality_var, "Auto (Best available)")
         self.quality_label.grid(row=self.QUALITY_ROW_IDX, column=0, sticky="w", padx=5, pady=2)
         self.quality_menu.grid(row=self.QUALITY_ROW_IDX, column=1, sticky="ew", padx=5, pady=2)
 
-        row_idx = self.QUALITY_ROW_IDX + 1  # Update row_idx to be after quality controls
+        row_idx = self.QUALITY_ROW_IDX + 1
         tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT).grid(row=row_idx, column=0,
                                                                                        sticky="w", padx=5, pady=2)
         self.filename_entry = tk.Entry(input_frame, font=MAIN_FONT)
@@ -660,124 +656,79 @@ class YTDLPGUIApp:
         self.mp3_check.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         row_idx += 1
-        # Renamed "Add to Queue" to "Download"
         self.add_to_queue_button = tk.Button(input_frame, text="Download", command=self._add_current_to_queue,
                                              bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT)
         self.add_to_queue_button.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=10)
 
-        # --- Queue Management Section (removed Start Queue button) ---
-        queue_control_frame = tk.Frame(self.main_frame)
-        queue_control_frame.pack(fill="x", pady=5)
+        # --- Control Buttons Section ---
+        control_buttons_frame = tk.Frame(self.main_frame)
+        control_buttons_frame.pack(fill="x", pady=5)
 
-        self.clear_queue_button = tk.Button(queue_control_frame, text="Clear Queue", command=self._clear_queue,
+        self.clear_queue_button = tk.Button(control_buttons_frame, text="Clear Queue", command=self._clear_queue,
                                             bg=COLOR_CLEAR_BUTTON, fg="black", font=BOLD_FONT)
         self.clear_queue_button.pack(side="left", expand=True, fill="x", padx=2)
 
-        self.open_downloads_button = tk.Button(queue_control_frame, text="Open Downloads",
+        self.open_downloads_button = tk.Button(control_buttons_frame, text="Open Downloads",
                                                command=self._open_downloads_folder, bg=COLOR_OPEN_FOLDER_BUTTON,
                                                fg="white", font=BOLD_FONT)
         self.open_downloads_button.pack(side="left", expand=True, fill="x", padx=2)
 
-        self.clear_history_button = tk.Button(queue_control_frame, text="Clear History",
+        self.clear_history_button = tk.Button(control_buttons_frame, text="Clear History",
                                               command=self._clear_finished_history, bg=COLOR_CLEAR_BUTTON, fg="black",
                                               font=BOLD_FONT)
         self.clear_history_button.pack(side="left", expand=True, fill="x", padx=2)
 
-        # Removed the Toggle Log button as requested
-        # self.toggle_log_button = tk.Button(queue_control_frame, text="Toggle Log", command=self._toggle_log_window, bg=COLOR_TOGGLE_LOG_BUTTON, fg="white", font=BOLD_FONT)
-        # self.toggle_log_button.pack(side="left", expand=True, fill="x", padx=2)
+        # --- Combined Downloads Display Area ---
+        # Removed ttk.Notebook and combined tabs
+        self.downloads_canvas = tk.Canvas(self.main_frame, bg="white", highlightthickness=0)
+        self.downloads_canvas.pack(fill="both", expand=True, pady=5)
+        self.downloads_canvas.grid_rowconfigure(0, weight=1)  # Ensure canvas expands
+        self.downloads_canvas.grid_columnconfigure(0, weight=1)
 
-        # --- Download Items Display Area with Tabs ---
-        self.notebook = ttk.Notebook(self.main_frame)
-        self.notebook.pack(fill="both", expand=True, pady=5)
+        self.downloads_scroll_y = tk.Scrollbar(self.downloads_canvas, orient="vertical",
+                                               command=self.downloads_canvas.yview)
+        self.downloads_scroll_y.pack(side="right", fill="y")
+        self.downloads_canvas.config(yscrollcommand=self.downloads_scroll_y.set)
 
-        # Active Downloads Tab
-        self.active_tab_frame = tk.Frame(self.notebook)
-        self.notebook.add(self.active_tab_frame, text="Active Downloads")
-        self.active_tab_frame.grid_rowconfigure(0, weight=1)
-        self.active_tab_frame.grid_columnconfigure(0, weight=1)
+        self.downloads_frame_inner = tk.Frame(self.downloads_canvas, bg="white")
+        self.downloads_canvas_window_id = self.downloads_canvas.create_window((0, 0), window=self.downloads_frame_inner,
+                                                                              anchor="nw",
+                                                                              width=self.downloads_canvas.winfo_width())
 
-        self.active_canvas = tk.Canvas(self.active_tab_frame, bg="white", highlightthickness=0)
-        self.active_canvas.grid(row=0, column=0, sticky="nsew")
-        self.active_scroll_y = tk.Scrollbar(self.active_tab_frame, orient="vertical", command=self.active_canvas.yview)
-        self.active_scroll_y.grid(row=0, column=1, sticky="ns")
-        self.active_canvas.config(yscrollcommand=self.active_scroll_y.set)
-        self.active_downloads_frame_inner = tk.Frame(self.active_canvas, bg="white")
-        self.active_canvas_window_id = self.active_canvas.create_window((0, 0),
-                                                                        window=self.active_downloads_frame_inner,
-                                                                        anchor="nw",
-                                                                        width=self.active_canvas.winfo_width())
-        self.active_downloads_frame_inner.bind("<Configure>", lambda e: self.active_canvas.configure(
-            scrollregion=self.active_canvas.bbox("all")))
-        self.active_canvas.bind('<Configure>', self._on_active_canvas_resize)
-        # Added mouse wheel scrolling for active downloads
-        self.active_canvas.bind('<MouseWheel>', self._on_mousewheel_active)  # Windows/macOS
-        self.active_canvas.bind('<Button-4>', self._on_mousewheel_active)  # Linux scroll up
-        self.active_canvas.bind('<Button-5>', self._on_mousewheel_active)  # Linux scroll down
-
-        # Finished Downloads Tab
-        self.finished_tab_frame = tk.Frame(self.notebook)
-        self.notebook.add(self.finished_tab_frame, text="Finished Downloads")
-        self.finished_tab_frame.grid_rowconfigure(0, weight=1)
-        self.finished_tab_frame.grid_columnconfigure(0, weight=1)
-
-        self.finished_canvas = tk.Canvas(self.finished_tab_frame, bg="white", highlightthickness=0)
-        self.finished_canvas.grid(row=0, column=0, sticky="nsew")
-        self.finished_scroll_y = tk.Scrollbar(self.finished_tab_frame, orient="vertical",
-                                              command=self.finished_canvas.yview)
-        self.finished_scroll_y.grid(row=0, column=1, sticky="ns")
-        self.finished_canvas.config(yscrollcommand=self.finished_scroll_y.set)
-        self.finished_downloads_frame_inner = tk.Frame(self.finished_canvas, bg="white")
-        self.finished_canvas_window_id = self.finished_canvas.create_window((0, 0),
-                                                                            window=self.finished_downloads_frame_inner,
-                                                                            anchor="nw",
-                                                                            width=self.finished_canvas.winfo_width())
-        self.finished_downloads_frame_inner.bind("<Configure>", lambda e: self.finished_canvas.configure(
-            scrollregion=self.finished_canvas.bbox("all")))
-        self.finished_canvas.bind('<Configure>', self._on_finished_canvas_resize)
-        # Added mouse wheel scrolling for finished downloads
-        self.finished_canvas.bind('<MouseWheel>', self._on_mousewheel_finished)  # Windows/macOS
-        self.finished_canvas.bind('<Button-4>', self._on_mousewheel_finished)  # Linux scroll up
-        self.finished_canvas.bind('<Button-5>', self._on_mousewheel_finished)  # Linux scroll down
+        self.downloads_frame_inner.bind("<Configure>", lambda e: self.downloads_canvas.configure(
+            scrollregion=self.downloads_canvas.bbox("all")))
+        self.downloads_canvas.bind('<Configure>', self._on_downloads_canvas_resize)
+        # Added mouse wheel scrolling for the combined downloads display
+        self.downloads_canvas.bind('<MouseWheel>', self._on_mousewheel)  # Windows/macOS
+        self.downloads_canvas.bind('<Button-4>', self._on_mousewheel)  # Linux scroll up
+        self.downloads_canvas.bind('<Button-5>', self._on_mousewheel)  # Linux scroll down
 
         # --- Status Bar ---
         self.status_bar = tk.Label(self.master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=SMALL_FONT,
                                    fg=COLOR_STATUS_READY)
         self.status_bar.pack(side="bottom", fill="x")
 
-    def _on_mousewheel_active(self, event):
-        self.active_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _on_mousewheel(self, event):
+        """Handles mouse wheel scrolling for the combined downloads canvas."""
+        self.downloads_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"  # Prevent event propagation
 
-    def _on_mousewheel_finished(self, event):
-        self.finished_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        return "break"  # Prevent event propagation
-
-    def _on_active_canvas_resize(self, event):
-        """Adjusts the width of the inner frame for active downloads when the canvas resizes."""
-        self.active_canvas.itemconfig(self.active_canvas_window_id, width=event.width)
-        self.active_canvas.configure(scrollregion=self.active_canvas.bbox("all"))
-
-    def _on_finished_canvas_resize(self, event):
-        """Adjusts the width of the inner frame for finished downloads when the canvas resizes."""
-        self.finished_canvas.itemconfig(self.finished_canvas_window_id, width=event.width)
-        self.finished_canvas.configure(scrollregion=self.finished_canvas.bbox("all"))
+    def _on_downloads_canvas_resize(self, event):
+        """Adjusts the width of the inner frame when the canvas resizes."""
+        self.downloads_canvas.itemconfig(self.downloads_canvas_window_id, width=event.width)
+        self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
 
     def _initialize_download_management(self):
         self.queued_downloads = []  # List of DownloadItem objects (waiting to start)
         self.active_downloads = []  # List of DownloadItem objects (currently downloading)
-        self.download_items_map = {}  # {item_id: DownloadItem object} for easy lookup of all items
+        self.download_items_map = {}  # {item_id: DownloadItem object} for easy lookup of all items (active and finished)
 
-        self.finished_downloads_data = []  # List of dictionaries for finished downloads history
+        self.finished_downloads_data = []  # List of dictionaries for finished downloads history (used for saving/loading)
 
-        self.download_item_counter = 0  # Used for generating unique local IDs
+        self.download_item_counter = 0
         self.completed_downloads_count = 0
         self.total_downloads_added = 0
-        # self.is_queue_processing_active is no longer explicitly toggled by a button,
-        # it's implicitly true as long as there are items to process and slots available.
-        # However, we keep it as a flag to control the main loop's behavior
         self.is_queue_processing_active = False
-        # Initialize as cleared. It will be set when a started queue actually completes.
         self.all_downloads_completed = threading.Event()
 
     def _configure_yt_dlp_path(self):
@@ -797,10 +748,10 @@ class YTDLPGUIApp:
 
             self._update_quality_options_grouped(
                 [("Auto (Best available)", "Auto (Best available)")],
-                [], [], [],  # Dynamic qualities will be fetched
-                [("1080", "High Quality - 1080p")],  # Fixed High Quality
-                [("720", "Medium Quality - 720p")],  # Fixed Medium Quality
-                [("480", "Low Quality - 480p")]  # Fixed Low Quality
+                [], [], [],
+                [("1080", "High Quality - 1080p")],
+                [("720", "Medium Quality - 720p")],
+                [("480", "Low Quality - 480p")]
             )
             self.quality_label.grid(row=quality_row, column=0, sticky="w", padx=5, pady=2)
             self.quality_menu.grid(row=quality_row, column=1, sticky="ew", padx=5, pady=2)
@@ -839,46 +790,41 @@ class YTDLPGUIApp:
 
         source = self.source_var.get()
         quality = self.quality_var.get()
-        filename_input = self.filename_entry.get().strip()  # Get filename from input
+        filename_input = self.filename_entry.get().strip()
 
-        # Determine if filename was provided by user
         filename_provided_by_user = bool(filename_input)
-
-        # Initial filename for the DownloadItem before title is fetched.
-        # This will be updated once fetch_title_async completes if not user-provided.
         filename = filename_input if filename_provided_by_user else url.split('/')[-1].split('?')[0][:50]
 
         mp3_conversion = self.mp3_var.get()
         referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
 
         self.download_item_counter += 1
-        item_id = f"dl_{self.download_item_counter}_{int(time.time())}"  # Unique ID for this item
-        # Updated date format to MM|DD|YYYY - H:MMpm
+        item_id = f"dl_{self.download_item_counter}_{int(time.time())}"
         current_time_str = time.strftime("%m|%d|%Y - %I:%M%p")
 
         new_download_data = {
             'id': item_id,
             'url': url,
             'quality': quality,
-            'filename': filename,  # Use the determined filename
+            'filename': filename,
             'mp3_conversion': mp3_conversion,
             'source': source,
             'referer': referer,
             'status': 'queued',
-            'video_title': 'Fetching Title...',  # Will be updated async
-            'date_added': current_time_str,  # New: date added
-            'filename_provided_by_user': filename_provided_by_user,  # New: Store this flag
-            'elapsed_time_seconds': 0  # Initialize elapsed time for new items
+            'video_title': 'Fetching Title...',
+            'date_added': current_time_str,
+            'filename_provided_by_user': filename_provided_by_user,
+            'elapsed_time_seconds': 0
         }
 
-        new_item = DownloadItem(self.active_downloads_frame_inner, self, new_download_data, is_active_tab=True)
+        new_item = DownloadItem(self, new_download_data, is_active_item=True)  # Always active initially
         self.queued_downloads.append(new_item)
-        self.download_items_map[new_item.item_id] = new_item
+        self.download_items_map[new_item.item_id] = new_item  # Add to overall map of all items
         self.total_downloads_added += 1
 
         self._set_status(f"Added '{url[:40]}...' to queue. Queue size: {len(self.queued_downloads)}",
                          COLOR_STATUS_READY)
-        self._update_queue_control_buttons()  # This is the old name, will be adjusted.
+        self._update_queue_control_buttons()
 
         # Clear input fields after adding
         self.url_entry.delete(0, END)
@@ -895,9 +841,9 @@ class YTDLPGUIApp:
             [("480", "Low Quality - 480p")]
         )
 
-        self.active_downloads_frame_inner.update_idletasks()
-        self.active_canvas.yview_moveto(1.0)
-        # Call _process_queue. If slots are free, it will start. This is intended for concurrency.
+        self._refresh_display_order()  # Refresh to show new queued item
+        self.downloads_canvas.yview_moveto(1.0)  # Scroll to new item
+
         self._process_queue()
 
     def _add_to_queue_on_enter(self, event=None):
@@ -920,7 +866,7 @@ class YTDLPGUIApp:
 
     def _fetch_and_update_quality_options(self, url):
         """Fetches available formats from yt-dlp and updates the quality OptionMenu."""
-        self.quality_var.set("Fetching qualities...")  # Provide immediate feedback
+        self.quality_var.set("Fetching qualities...")
 
         fixed_high_q = [("1080", "High Quality - 1080p")]
         fixed_medium_q = [("720", "Medium Quality - 720p")]
@@ -1061,46 +1007,38 @@ class YTDLPGUIApp:
         else:
             self.quality_var.set("No qualities found")
 
-    def _start_queue_processing(self):
-        """Activates queue processing. This method is now implicitly called by _process_queue."""
-        self.is_queue_processing_active = True
-        self.all_downloads_completed.clear()  # Clear the flag when queue processing starts
-        self._set_status("Queue processing started...", COLOR_STATUS_PROGRESS)
-        self._process_queue()  # Kick off initial processing
-
     def _process_queue_loop(self):
         """Main loop for polling individual download item queues and managing concurrency."""
+        # Loop through active downloads to update their UI elements like elapsed time.
         for item in list(self.active_downloads):
             try:
                 while True:
                     _ = item.output_queue.get_nowait()
             except queue.Empty:
                 pass
-            # Update elapsed time for active downloads if not already being updated by subprocess output
-            # This ensures elapsed time updates even if yt-dlp isn't printing progress (e.g., during initial setup)
-            if item.start_time and item.is_active_tab:  # Check is_active_tab to ensure it's still in the active view
+
+            if item.start_time:  # Only update if download has started
                 elapsed = time.time() - item.start_time
-                # Only update elapsed_time_label if it's still mapped to the screen (active tab)
+                # Only update elapsed_time_label if it's still mapped to the screen (active item)
                 if item.elapsed_time_label.winfo_exists() and item.elapsed_time_label.winfo_ismapped():
                     item.elapsed_time_label.config(text=f"Time: {item._format_seconds_to_dd_hh_mm_ss(elapsed)}")
 
         # Keep processing queue if there are items or active downloads
         if self.queued_downloads or self.active_downloads:
-            self.is_queue_processing_active = True  # Ensure this flag stays true
+            self.is_queue_processing_active = True
             self._process_queue()
         else:
-            self.is_queue_processing_active = False  # No more items, set to false
+            self.is_queue_processing_active = False
 
-        # Only show completion alert if queue processing was active AND now all are done.
-        # Check if all downloads have truly finished and the processing was active.
+            # Only show completion alert if processing was active AND now all are done.
         if not self.is_queue_processing_active and not self.queued_downloads and not self.active_downloads:
-            if not self.all_downloads_completed.is_set():  # Only show if it wasn't already shown for this cycle
+            if not self.all_downloads_completed.is_set():
                 self.all_downloads_completed.set()
                 self._show_overall_completion_alert()
                 self._set_status("All downloads complete!", COLOR_STATUS_COMPLETE)
                 self.total_downloads_added = 0
                 self.completed_downloads_count = 0
-                self.is_queue_processing_active = False  # Reset this flag
+                self.is_queue_processing_active = False
                 self._update_queue_control_buttons()
 
         self.master.after(100, self._process_queue_loop)
@@ -1110,16 +1048,15 @@ class YTDLPGUIApp:
         Checks for available slots, handles file conflicts, and starts downloads from the queue.
         This method is called repeatedly by the main loop.
         """
-        self.is_queue_processing_active = True  # Ensure processing is considered active when this is called
+        self.is_queue_processing_active = True
 
         # Iterate over a copy of queued_downloads so we can modify the original list
         for i, next_item in enumerate(list(self.queued_downloads)):
             if len(self.active_downloads) >= MAX_CONCURRENT_DOWNLOADS:
-                break  # Max concurrent downloads reached
+                break
 
-            # Only process items where filename is explicitly provided OR title has been fetched
+                # Only process items where filename is explicitly provided OR title has been fetched
             if not next_item.filename_provided_by_user and not next_item.is_title_fetched:
-                # This item is not ready yet, skip it for this cycle
                 continue
 
             # Determine the expected file extension based on mp3_conversion
@@ -1136,14 +1073,12 @@ class YTDLPGUIApp:
                 # Remove from queued_downloads immediately to avoid re-processing in the loop
                 self.queued_downloads.remove(next_item)
                 self._show_file_conflict_dialog(next_item, proposed_filepath)
-                # After dialog, _handle_file_conflict_choice will either start download or move to history.
-                # It will also call _process_queue again. So we can return here.
                 return
             else:
                 # No conflict, proceed with download
-                self.queued_downloads.remove(next_item)  # Officially remove from queue
+                self.queued_downloads.remove(next_item)
                 self.active_downloads.append(next_item)
-                next_item.start_download()
+                next_item.start_download()  # This will call _refresh_display_order
                 display_title = next_item.video_title if next_item.video_title != 'Fetching Title...' else next_item.url
                 self._set_status(
                     f"Starting download for '{display_title[:40]}...'. Active: {len(self.active_downloads)}",
@@ -1157,8 +1092,8 @@ class YTDLPGUIApp:
         """
         dialog = tk.Toplevel(self.master)
         dialog.title("File Exists")
-        dialog.transient(self.master)  # Make it a transient window of the master
-        dialog.grab_set()  # Make it modal
+        dialog.transient(self.master)
+        dialog.grab_set()
         dialog.resizable(False, False)
 
         filename_display = os.path.basename(existing_filepath)
@@ -1169,16 +1104,15 @@ class YTDLPGUIApp:
         button_frame = tk.Frame(dialog, padx=10, pady=5)
         button_frame.pack()
 
-        result = tk.StringVar(value="")  # To store the user's choice
+        result = tk.StringVar(value="")
 
         def on_choice(choice):
             result.set(choice)
-            dialog.destroy()  # Close the dialog
+            dialog.destroy()
 
         tk.Button(button_frame, text="Overwrite", bg=COLOR_ABORT_BUTTON, fg="white", font=BOLD_FONT,
                   command=lambda: on_choice("overwrite")).pack(side="left", padx=5, pady=5)
         tk.Button(button_frame, text="Keep Both", bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT,
-                  # Changed color to Add Button green
                   command=lambda: on_choice("keep_both")).pack(side="left", padx=5, pady=5)
         tk.Button(button_frame, text="Cancel", bg=COLOR_CLEAR_BUTTON, fg="black", font=BOLD_FONT,
                   command=lambda: on_choice("cancel")).pack(side="left", padx=5, pady=5)
@@ -1208,16 +1142,16 @@ class YTDLPGUIApp:
             base_name_for_renaming = match.group(1) if match else original_filename_no_ext
 
             new_filename = self._generate_unique_filename(base_name_for_renaming, download_item.mp3_conversion)
-            download_item.filename = new_filename  # Update the item's filename
+            download_item.filename = new_filename
 
             self.active_downloads.append(download_item)
             download_item.start_download()
             self._set_status(f"Starting download (renamed to '{new_filename}'). Active: {len(self.active_downloads)}",
                              COLOR_STATUS_PROGRESS)
         else:  # cancel
-            self.download_finished(download_item, 'aborted')  # Mark as aborted and move to finished tab
+            self.download_finished(download_item, 'aborted')
 
-        self._process_queue()  # Try to start next available download
+        self._process_queue()
 
     def _generate_unique_filename(self, base_name, is_mp3):
         """Generates a unique filename by appending (n) if a file exists."""
@@ -1237,56 +1171,39 @@ class YTDLPGUIApp:
             self.active_downloads.remove(item_obj)
             self.completed_downloads_count += 1
 
-        # Update item's status and date_completed for history
         item_obj.status = final_status
-        # Updated date format to MM|DD|YYYY - H:MMpm
         item_obj.date_completed = time.strftime("%m|%d|%Y - %I:%M%p")
-
-        # Calculate and store final elapsed time
         if item_obj.start_time:
             item_obj.elapsed_time_seconds = time.time() - item_obj.start_time
         else:
-            item_obj.elapsed_time_seconds = 0  # Fallback if start_time wasn't set
+            item_obj.elapsed_time_seconds = 0
 
-        # Save to local history (now inserts at the beginning for newest-on-top)
+            # Mark as not an active item anymore
+        item_obj.is_active_item = False
+
+        # Add to local history (inserts at the beginning for newest-on-top)
         self._add_to_local_history(item_obj)
 
-        # Move UI to finished tab - needs to be recreated for ordering
-        # First, destroy existing widgets in finished downloads frame to redraw in new order
-        for widget in self.finished_downloads_frame_inner.winfo_children():
-            widget.destroy()
-
-        # Re-populate finished tab UI from the sorted finished_downloads_data
-        # This ensures that when new items are added, or history is loaded,
-        # they are correctly displayed with the newest at the top.
-        for item_data in self.finished_downloads_data:
-            item_obj_for_display = DownloadItem(self.finished_downloads_frame_inner, self, item_data,
-                                                is_active_tab=False)
-            # Ensure the status is set correctly for history items
-            item_obj_for_display.update_status(item_data['status'],
-                                               item_obj_for_display._get_status_color(item_data['status']))
-
-        self.finished_downloads_frame_inner.update_idletasks()
-        self.finished_canvas.yview_moveto(1.0)  # Scroll to new item (which is now at top visually)
+        # Refresh the entire display to re-sort all items
+        self._refresh_display_order()
 
         self._update_queue_control_buttons()
-        # Immediately re-process queue to kick off next downloads if available
         self._process_queue()
 
     def _add_to_local_history(self, item_obj):
         """Adds a finished download item to the local history list and saves to file."""
         history_entry = {
-            'id': item_obj.item_id,  # Keep ID for internal tracking
+            'id': item_obj.item_id,
             'url': item_obj.url,
             'video_title': item_obj.video_title,
-            'filename': item_obj.filename,  # Store the final filename
+            'filename': item_obj.filename,
             'date_completed': item_obj.date_completed,
-            'status': item_obj.status,  # Save final status
-            'date_added': item_obj.date_added,  # Store date added
-            'filename_provided_by_user': item_obj.filename_provided_by_user,  # Store this flag
-            'elapsed_time_seconds': item_obj.elapsed_time_seconds  # Store elapsed time
+            'status': item_obj.status,
+            'date_added': item_obj.date_added,
+            'filename_provided_by_user': item_obj.filename_provided_by_user,
+            'elapsed_time_seconds': item_obj.elapsed_time_seconds
         }
-        self.finished_downloads_data.insert(0, history_entry)  # Insert at beginning for newest-on-top
+        self.finished_downloads_data.insert(0, history_entry)
         self._save_downloads_to_local_history()
 
     def _load_downloads_from_local_history(self):
@@ -1297,16 +1214,15 @@ class YTDLPGUIApp:
 
         try:
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                self.finished_downloads_data = json.load(f)
+                loaded_data = json.load(f)
+                # Ensure each loaded item is instantiated as DownloadItem and added to the map
+                for item_data in loaded_data:
+                    item_obj = DownloadItem(self, item_data,
+                                            is_active_item=False)  # These are historical, so not active
+                    self.download_items_map[item_obj.item_id] = item_obj
+                self.finished_downloads_data = loaded_data  # Keep raw data for saving
 
-            # Recreate widgets for the finished tab in correct order (newest first)
-            for item_data in self.finished_downloads_data:
-                # For items loaded from history, they are inherently "finished"
-                item_obj = DownloadItem(self.finished_downloads_frame_inner, self, item_data, is_active_tab=False)
-                self.download_items_map[item_obj.item_id] = item_obj  # Add to overall map
-
-            self.finished_downloads_frame_inner.update_idletasks()
-            self.finished_canvas.config(scrollregion=self.finished_canvas.bbox("all"))
+            self._refresh_display_order()  # Populate display
             self._set_status(f"Loaded {len(self.finished_downloads_data)} finished downloads from history.",
                              COLOR_STATUS_READY)
 
@@ -1329,80 +1245,67 @@ class YTDLPGUIApp:
         """Removes a pending download item from the queue if aborted before starting."""
         if item_obj in self.queued_downloads:
             self.queued_downloads.remove(item_obj)
-            self.download_finished(item_obj, 'aborted')  # Mark as aborted and move to finished tab
+            self.download_finished(item_obj, 'aborted')
 
         self._update_queue_control_buttons()
 
     def _clear_queue(self):
         """Clears all pending downloads from the queue and resets the UI."""
-        # Check if there are any downloads at all (active or queued)
         if not self.active_downloads and not self.queued_downloads:
             messagebox.showinfo("Clear Queue", "The download queue is already empty.")
             return
 
-        # Ask for confirmation only if there are any downloads to clear
         if not messagebox.askyesno("Clear Queue",
                                    "Are you sure you want to clear the entire download queue (including active and pending downloads)?"):
             return
 
         # Abort active downloads first
-        for item in list(self.active_downloads):  # Iterate over a copy because the list will be modified
-            item.abort_download()  # This will call download_finished to move them to history
+        for item in list(self.active_downloads):
+            item.abort_download()
 
-        # Cancel queued downloads (not yet active)
-        # Iterate over a copy and remove from original list inside loop
+            # Cancel queued downloads (not yet active)
         for item in list(self.queued_downloads):
-            item.frame.destroy()  # Remove its UI from the active downloads frame
+            # No process to kill for queued items, just mark as cancelled
             if item.item_id in self.download_items_map:
-                del self.download_items_map[item.item_id]
-            self.download_finished(item, 'cancelled')  # Mark as cancelled and move to history
+                # Ensure the item is properly moved to history with cancelled status
+                self.download_finished(item, 'cancelled')
 
-        self.queued_downloads.clear()  # Ensure the internal queue list is empty
+        self.queued_downloads.clear()
 
         self.total_downloads_added = 0
         self.completed_downloads_count = 0
-        self.is_queue_processing_active = False  # Reset this explicitly after clearing
-        self.all_downloads_completed.set()  # Set the flag as queue is now clear
+        self.is_queue_processing_active = False
+        self.all_downloads_completed.set()
 
         self._set_status("Queue cleared. All active/queued downloads aborted/cancelled.", COLOR_STATUS_ABORTED)
         self._update_queue_control_buttons()
-        self.active_downloads_frame_inner.update_idletasks()
-        self.active_canvas.config(scrollregion=self.active_canvas.bbox("all"))
+        self._refresh_display_order()  # Refresh display to remove cancelled items
 
     def _clear_finished_history(self):
         """Clears all items from the finished downloads history."""
-        if not self.finished_downloads_data and not self.finished_downloads_frame_inner.winfo_children():
+        if not self.finished_downloads_data and not self.downloads_frame_inner.winfo_children():
             messagebox.showinfo("Clear History", "Finished downloads history is already empty.")
             return
 
         if messagebox.askyesno("Clear History",
                                "Are you sure you want to clear ALL finished download history? This cannot be undone."):
-            # Explicitly destroy all child widgets in the finished downloads frame
-            for widget in self.finished_downloads_frame_inner.winfo_children():
-                widget.destroy()
-
-            # Clear the in-memory list and the overall map
+            # Clear the in-memory list
             self.finished_downloads_data.clear()
 
-            # Rebuild download_items_map to only contain active items, if any
-            # This is safer than selectively deleting from a map while iterating,
-            # especially since we just destroyed all finished widgets.
-            temp_map = {}
-            for item_id, item_obj in self.download_items_map.items():
-                if item_obj.is_active_tab:
-                    temp_map[item_id] = item_obj
-            self.download_items_map = temp_map
+            # Remove finished items from the overall map
+            keys_to_remove = [item_id for item_id, item_obj in self.download_items_map.items() if
+                              not item_obj.is_active_item]
+            for key in keys_to_remove:
+                del self.download_items_map[key]
 
             self._save_downloads_to_local_history()  # Save empty list to file
+            self._refresh_display_order()  # Refresh display to remove history items
 
-            self.finished_downloads_frame_inner.update_idletasks()
-            self.finished_canvas.config(scrollregion=self.finished_canvas.bbox("all"))
             self._set_status("Finished downloads history cleared.", COLOR_STATUS_READY)
             messagebox.showinfo("History Cleared", "All finished download history has been cleared.")
 
     def _update_queue_control_buttons(self, event=None):
         """Enables/disables queue control buttons based on queue/active status."""
-        # The start queue button no longer exists, so this only affects clear button
         clear_enabled = bool(self.queued_downloads) or bool(self.active_downloads)
 
         self.clear_queue_button.config(state="normal" if clear_enabled else "disabled")
@@ -1411,6 +1314,72 @@ class YTDLPGUIApp:
         """Shows a single alert when all downloads are finished."""
         messagebox.showinfo("All Downloads Complete", "All items in the queue have finished downloading!")
         pass
+
+    def _refresh_display_order(self):
+        """Refreshes the display of all download items based on their status and order."""
+        # 1. Destroy existing widgets in the display frame
+        for widget in self.downloads_frame_inner.winfo_children():
+            widget.destroy()
+
+        # 2. Prepare all items for display
+        all_display_items = []
+        # Add active items
+        for item_obj in self.active_downloads:
+            all_display_items.append(item_obj)
+        # Add queued items
+        for item_obj in self.queued_downloads:
+            all_display_items.append(item_obj)
+
+        # Add finished/aborted/cancelled items (from history data)
+        # Re-instantiate DownloadItem objects from history data to ensure fresh UI elements
+        # (This avoids issues if a DownloadItem object was destroyed from an old parent frame
+        # but its data still exists in finished_downloads_data)
+        for item_data in self.finished_downloads_data:
+            # Retrieve the existing DownloadItem object if it's already in the map,
+            # otherwise create a new one (e.g., if loaded from history file for first time).
+            # This is to ensure we don't duplicate DownloadItem objects if they are already active/queued.
+            if item_data['id'] not in self.download_items_map:
+                # This case should ideally not happen if download_items_map always holds all
+                # items, but as a safeguard.
+                item_obj = DownloadItem(self, item_data, is_active_item=False)
+                self.download_items_map[item_obj.item_id] = item_obj
+            else:
+                item_obj = self.download_items_map[item_data['id']]
+                item_obj.is_active_item = False  # Ensure it's marked as non-active for display purposes
+            all_display_items.append(item_obj)
+
+        # 3. Sort items for display: Active first, then finished (newest first)
+        def sort_key(item):
+            # Active items (True for is_active_item) come first (False for reverse sorting)
+            active_sort = not item.is_active_item
+
+            # For finished items, sort by date_completed descending (newest first)
+            # Use a safe default for date conversion if date_completed is not available or "N/A"
+            if not item.is_active_item and item.date_completed != 'N/A':
+                try:
+                    # Convert "MM|DD|YYYY - H:MMpm" to a comparable timestamp
+                    date_obj = time.strptime(item.date_completed, "%m|%d|%Y - %I:%M%p")
+                    time_sort = -time.mktime(date_obj)  # Negative for descending order (newest first)
+                except ValueError:
+                    time_sort = -time.time()  # Fallback to current time if date format is unexpected
+            else:
+                time_sort = -time.time()  # Active/queued items: no date_completed, use current time (will be overridden by active_sort)
+
+            return (active_sort, time_sort)
+
+        all_display_items.sort(key=sort_key)
+
+        # 4. Pack items into the display frame
+        for item_obj in all_display_items:
+            item_obj.parent_frame = self.downloads_frame_inner  # Set the current parent frame
+            item_obj._build_frame_widgets()  # Build/rebuild its widgets
+            item_obj.frame.pack(fill="x", padx=5, pady=3)  # Pack the frame into the inner frame
+            item_obj._update_title_label()  # Ensure labels are correctly updated after packing
+            item_obj.update_status(item_obj.status, item_obj._get_status_color(item_obj.status))
+
+        # 5. Update canvas scroll region
+        self.downloads_frame_inner.update_idletasks()
+        self.downloads_canvas.config(scrollregion=self.downloads_canvas.bbox("all"))
 
 
 if __name__ == "__main__":
