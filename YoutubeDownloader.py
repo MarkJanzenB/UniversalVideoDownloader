@@ -25,6 +25,7 @@ COLOR_START_QUEUE_BUTTON = "#007BFF"  # Blue
 COLOR_CLEAR_BUTTON = "#FFC107"  # Yellow-Orange
 COLOR_OPEN_FOLDER_BUTTON = "#6C757D"  # Grey/Dark grey
 COLOR_OPEN_FILE_BUTTON = "#17A2B8"  # Info Blue/Cyan
+COLOR_TOGGLE_LOG_BUTTON = "#6F42C1"  # Purple
 
 COLOR_STATUS_READY = "black"
 COLOR_STATUS_PROGRESS = "#007BFF"  # Blue
@@ -352,6 +353,11 @@ class DownloadItem:
                 if self.is_aborted:
                     break
                 self.output_queue.put(line)
+                # If log window is visible, append line to it
+                if self.app_instance.log_window_visible and self.app_instance.log_text:
+                    self.app_instance.master.after(0, lambda l=line: self.app_instance.log_text.insert(END, l))
+                    self.app_instance.master.after(0, lambda: self.app_instance.log_text.see(END))  # Auto-scroll
+
                 self._parse_output_for_progress(line)
                 # Update elapsed time live
                 if self.start_time:  # Only update if download has started
@@ -378,10 +384,18 @@ class DownloadItem:
         except FileNotFoundError:
             final_status = "failed"
             self.update_status("failed", COLOR_STATUS_FAILED)  # Use internal status names
+            if self.app_instance.log_window_visible and self.app_instance.log_text:
+                self.app_instance.master.after(0, lambda: self.app_instance.log_text.insert(END,
+                                                                                            "ERROR: yt-dlp.exe not found or not in PATH.\n"))
+                self.app_instance.master.after(0, lambda: self.app_instance.log_text.see(END))
             print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for download of URL: {self.url}")
         except Exception as e:
             final_status = "failed"
             self.update_status("failed", COLOR_STATUS_FAILED)
+            if self.app_instance.log_window_visible and self.app_instance.log_text:
+                self.app_instance.master.after(0, lambda: self.app_instance.log_text.insert(END,
+                                                                                            f"ERROR during yt-dlp execution: {e}\n"))
+                self.app_instance.master.after(0, lambda: self.app_instance.log_text.see(END))
             print(f"Error during yt-dlp execution for URL {self.url}: {e}")
         finally:
             self.process = None
@@ -478,6 +492,7 @@ class YTDLPGUIApp:
         self._setup_window(master)
 
         self._configure_yt_dlp_path()
+        self._create_menus()  # New: Create menus
 
         self._create_widgets()
         self._initialize_download_management()
@@ -485,6 +500,11 @@ class YTDLPGUIApp:
 
         self.master.after(100, self._process_queue_loop)
         self.on_source_change(YOUTUBE_SOURCE)
+
+        # Log Window variables
+        self.log_window = None
+        self.log_text = None
+        self.log_window_visible = False
 
     def _setup_window(self, master):
         master.title("YouTube Downloader powered by yt-dlp")
@@ -494,6 +514,82 @@ class YTDLPGUIApp:
             master.iconbitmap("ico.ico")
         except Exception:
             pass
+
+    def _create_menus(self):
+        """Creates the application menus."""
+        menubar = tk.Menu(self.master)
+        self.master.config(menu=menubar)
+
+        # Help Menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About Versions...", command=self._show_versions_info)
+
+        # View Menu for logs
+        view_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="View", menu=view_menu)
+        self.log_toggle_var = tk.BooleanVar(value=False)
+        view_menu.add_checkbutton(label="Show yt-dlp Process Log", variable=self.log_toggle_var,
+                                  command=self._toggle_log_window)
+
+    def _show_versions_info(self):
+        """Displays yt-dlp and ffmpeg version information."""
+        yt_dlp_version = "Not Found"
+        ffmpeg_version = "Not Found"
+
+        try:
+            # yt-dlp version
+            yt_dlp_result = subprocess.run([self.yt_dlp_path, "--version"], capture_output=True, text=True, check=True,
+                                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                                           timeout=5)
+            yt_dlp_version = yt_dlp_result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            # ffmpeg version (yt-dlp automatically uses it for merging/conversion)
+            ffmpeg_result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True,
+                                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                                           timeout=5)
+            ffmpeg_version_lines = ffmpeg_result.stdout.strip().split('\n')
+            if ffmpeg_version_lines:
+                ffmpeg_version = ffmpeg_version_lines[0]  # Get the first line of ffmpeg output
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        messagebox.showinfo(
+            "About Versions",
+            f"yt-dlp Version: {yt_dlp_version}\n"
+            f"FFmpeg Version: {ffmpeg_version}\n\n"
+            "This application uses yt-dlp for downloading and FFmpeg for media processing."
+        )
+
+    def _toggle_log_window(self):
+        """Toggles the visibility of the yt-dlp process log window."""
+        self.log_window_visible = self.log_toggle_var.get()
+
+        if self.log_window_visible:
+            if not self.log_window or not self.log_window.winfo_exists():
+                self.log_window = tk.Toplevel(self.master)
+                self.log_window.title("yt-dlp Process Log")
+                self.log_window.geometry("600x400")
+                self.log_window.protocol("WM_DELETE_WINDOW", self._on_log_window_close)  # Handle close button
+
+                self.log_text = scrolledtext.ScrolledText(self.log_window, wrap=tk.WORD, font=MONO_FONT, bg="black",
+                                                          fg="lightgreen", insertbackground="white")
+                self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
+                self.log_text.config(state=tk.DISABLED)  # Make it read-only
+            self.log_window.deiconify()  # Show the window
+        else:
+            if self.log_window and self.log_window.winfo_exists():
+                self.log_window.withdraw()  # Hide the window
+
+    def _on_log_window_close(self):
+        """Handles the log window close button, updating the toggle variable."""
+        self.log_toggle_var.set(False)
+        self.log_window_visible = False
+        if self.log_window:
+            self.log_window.withdraw()  # Hide the window
 
     def _open_downloads_folder(self):
         """Opens the main downloads directory."""
@@ -582,6 +678,11 @@ class YTDLPGUIApp:
                                               command=self._clear_finished_history, bg=COLOR_CLEAR_BUTTON, fg="black",
                                               font=BOLD_FONT)
         self.clear_history_button.pack(side="left", expand=True, fill="x", padx=2)
+
+        # New: Toggle Log Button
+        self.toggle_log_button = tk.Button(queue_control_frame, text="Toggle Log", command=self._toggle_log_window,
+                                           bg=COLOR_TOGGLE_LOG_BUTTON, fg="white", font=BOLD_FONT)
+        self.toggle_log_button.pack(side="left", expand=True, fill="x", padx=2)
 
         # --- Download Items Display Area with Tabs ---
         self.notebook = ttk.Notebook(self.main_frame)
