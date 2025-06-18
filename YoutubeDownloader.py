@@ -7,254 +7,554 @@ import threading
 import queue
 import shutil
 import time
+import re  # For extracting percentage, speed, and ETA
+
+# --- Constants for consistent naming and values ---
+DOWNLOADS_DIR = "downloads"
+TEMP_SUBDIR = "temp"
+YOUTUBE_SOURCE = "YouTube"
+XTREAM_SOURCE = "XtremeStream"
+MAX_CONCURRENT_DOWNLOADS = 2
+
+# Colors for buttons/status (Tailwind-like or common vibrant colors)
+COLOR_ADD_BUTTON = "#28A745"  # Green
+COLOR_ABORT_BUTTON = "#DC3545"  # Red
+COLOR_START_QUEUE_BUTTON = "#007BFF"  # Blue
+COLOR_CLEAR_BUTTON = "#FFC107"  # Yellow-Orange
+
+COLOR_STATUS_READY = "black"
+COLOR_STATUS_PROGRESS = "#007BFF"  # Blue
+COLOR_STATUS_COMPLETE = "#28A745"  # Green
+COLOR_STATUS_FAILED = "#DC3545"  # Red
+COLOR_STATUS_ABORTED = "#FFC107"  # Orange
+
+# Font for better aesthetics
+MAIN_FONT = ("Inter", 10)
+BOLD_FONT = ("Inter", 12, "bold")
+SMALL_FONT = ("Inter", 9)
+MONO_FONT = ("Roboto Mono", 9)  # For output box
+
+
+class DownloadItem:
+    """
+    Manages the UI and logic for a single download.
+    """
+
+    def __init__(self, parent_frame, app_instance, item_id, url, quality, filename, mp3_conversion, source, referer):
+        self.parent_frame = parent_frame  # The frame that will contain this item's UI
+        self.app_instance = app_instance  # Reference to the main YTDLPGUIApp instance
+        self.item_id = item_id  # Unique ID for this download item
+
+        self.url = url
+        self.quality = quality
+        self.filename = filename
+        self.mp3_conversion = mp3_conversion
+        self.source = source
+        self.referer = referer
+
+        self.process = None  # Holds the subprocess.Popen object
+        self.output_queue = queue.Queue()  # Queue for this specific download's stdout/stderr
+        self.start_time = None
+        self.is_aborted = False  # Flag to indicate if download was aborted by user
+
+        self._create_widgets()
+
+    def _create_widgets(self):
+        """Creates the UI elements for this individual download item."""
+        self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=5, pady=5, bg="#f0f0f0")
+        self.frame.pack(fill="x", padx=5, pady=3, expand=True)
+
+        # Row 1: URL/Filename Label
+        display_name = os.path.basename(self.filename) if self.filename else self.url
+        tk.Label(self.frame, text=f"URL: {self.url[:60]}... ({self.source})", font=MAIN_FONT, anchor="w",
+                 bg="#f0f0f0").pack(fill="x")
+        tk.Label(self.frame, text=f"Output: {display_name}", font=MAIN_FONT, anchor="w", bg="#f0f0f0").pack(fill="x")
+
+        # Row 2: Progress bar
+        self.progress_bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate")
+        self.progress_bar.pack(fill="x", pady=2)
+
+        # Row 3: Status and Abort button
+        status_frame = tk.Frame(self.frame, bg="#f0f0f0")
+        status_frame.pack(fill="x")
+
+        self.status_label = tk.Label(status_frame, text="Queued", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
+                                     fg=COLOR_STATUS_READY)
+        self.status_label.pack(side="left", fill="x", expand=True)
+
+        self.abort_button = tk.Button(status_frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
+                                      fg="white", font=SMALL_FONT)
+        self.abort_button.pack(side="right")
+
+    def start_download(self):
+        """Starts the yt-dlp process for this item in a new thread."""
+        self.is_aborted = False
+        self.start_time = time.time()
+        self.update_status("Starting...", COLOR_STATUS_PROGRESS)
+        self.abort_button.config(state="normal")
+        self.progress_bar.config(value=0)
+
+        command = self._build_command()
+        threading.Thread(target=self._run_yt_dlp, args=(command,), daemon=True).start()
+
+    def _build_command(self):
+        """Builds the yt-dlp command for this specific download item."""
+        command = [self.app_instance.yt_dlp_path, self.url]
+
+        # Referer handling
+        if self.source == XTREAM_SOURCE and self.referer:
+            command += ["--add-header", f"referer: {self.referer}"]
+
+        # Ensure downloads directory exists
+        downloads_dir = os.path.join(os.getcwd(), DOWNLOADS_DIR)
+        temp_dir = os.path.join(downloads_dir, TEMP_SUBDIR, str(self.item_id))  # Unique temp dir for each download
+        os.makedirs(temp_dir, exist_ok=True)
+        command += ["--paths", f"temp:{temp_dir}"]
+
+        # Filename and format
+        out_name = self.filename or "%(title)s"
+        if self.mp3_conversion:
+            out_name += ".mp3"
+            command += ["--extract-audio", "--audio-format", "mp3"]
+        else:
+            out_name += ".mp4"
+            command += ["--recode-video", "mp4"]  # Using recode-video as per original code
+
+        command += ["--output", os.path.join(downloads_dir, out_name)]
+
+        # Quality for YouTube
+        if self.source == YOUTUBE_SOURCE:
+            if "1080" in self.quality:
+                command += ['-f', 'bestvideo[height>=1080]+bestaudio/best[height<=1080]']
+            elif "720" in self.quality:
+                command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
+            elif "480" in self.quality:
+                command += ['-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]']
+
+        # Add a flag to allow yt-dlp to output more structured progress
+        command += ["--newline", "--progress"]
+        return command
+
+    def _run_yt_dlp(self, command):
+        """Runs the yt-dlp subprocess and captures its output."""
+        self.output_queue.put(f"Executing: {' '.join(command)}\n")
+        rc = -1  # Default return code for errors before execution
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            self.process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                universal_newlines=True, creationflags=creationflags
+            )
+            for line in self.process.stdout:
+                if self.is_aborted:  # Check abort flag while reading output
+                    break
+                self.output_queue.put(line)
+                self._parse_output_for_progress(line)
+
+            rc = self.process.wait()
+            if self.is_aborted:
+                self.update_status("Aborted", COLOR_STATUS_ABORTED)
+            elif rc == 0:
+                self.update_status("Complete", COLOR_STATUS_COMPLETE)
+                self.progress_bar.config(value=100)
+            else:
+                self.update_status(f"Failed (Exit {rc})", COLOR_STATUS_FAILED)
+
+        except FileNotFoundError:
+            self.update_status("Error: yt-dlp.exe not found.", COLOR_STATUS_FAILED)
+            self.output_queue.put(
+                "Error: yt-dlp.exe not found. Please ensure it's in the same directory as the app or in your PATH.\n")
+        except Exception as e:
+            self.update_status(f"Error: {e}", COLOR_STATUS_FAILED)
+            self.output_queue.put(f"An unexpected error occurred: {e}\n")
+        finally:
+            self.process = None  # Clear process reference
+            self.abort_button.config(state="disabled")
+            # Clean up temp directory
+            temp_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(self.item_id))
+            if os.path.exists(temp_path):
+                shutil.rmtree(temp_path, ignore_errors=True)
+            # Notify main app that this download is finished
+            self.app_instance.download_finished(self.item_id, rc == 0 and not self.is_aborted)
+
+    def _parse_output_for_progress(self, line):
+        """Parses a line of yt-dlp output for progress, speed, and ETA."""
+        # This regex tries to capture percentage, speed, and ETA from yt-dlp output.
+        # Example lines:
+        # [download] 12.3% of 123.45MiB at 1.23MiB/s ETA 00:01
+        # [download] 12.3% of 123.45MiB at Unknown ETA Unknown
+        match = re.search(
+            r'\[download\]\s+(\d+\.\d+)%\s+of\s+.*?\s+at\s+([0-9\.]+KiB/s|[0-9\.]+MiB/s|\S+)?(?:\s+ETA\s+(\d{2}:\d{2}))?',
+            line)
+        if match:
+            percent = float(match.group(1))
+            speed = match.group(2) if match.group(2) else 'N/A'
+            eta = match.group(3) if match.group(3) else 'N/A'
+
+            self.progress_bar.config(value=percent)
+            self.update_status(f"Downloading... {percent:.1f}% ({speed}, ETA {eta})", COLOR_STATUS_PROGRESS)
+        elif "merging formats" in line.lower() or "ffmpeg" in line.lower():
+            self.update_status("Converting...", COLOR_STATUS_PROGRESS)
+        elif "downloading" in line.lower():
+            self.update_status("Downloading...", COLOR_STATUS_PROGRESS)
+
+    def update_status(self, text, color):
+        """Updates the status label for this download item."""
+        self.status_label.config(text=text, fg=color)
+
+    def abort_download(self):
+        """Aborts the currently running download process."""
+        self.is_aborted = True
+        if self.process:
+            try:
+                self.process.kill()
+                self.update_status("Aborting...", COLOR_STATUS_ABORTED)  # Update immediately
+                self.output_queue.put("\nProcess aborted by user.\n")
+            except Exception as e:
+                self.output_queue.put(f"Error trying to abort process: {e}\n")
+                self.update_status(f"Abort error: {e}", COLOR_STATUS_FAILED)
+        else:
+            self.update_status("Already stopped/queued.", COLOR_STATUS_ABORTED)
+            self.output_queue.put("Download not active, removing from queue if present.\n")
+            # If not active, try to remove from queue directly
+            self.app_instance.remove_from_queue(self.item_id)
+
 
 class YTDLPGUIApp:
     def __init__(self, master):
         self.master = master
-        master.title("YouTube Downloader powered by yt-dlp")
-        master.geometry("400x520")
-        master.resizable(False, False)
+        self._setup_window(master)
+        self._create_widgets()
+        self._initialize_download_management()
+        self._configure_yt_dlp_path()
 
+        # Start the queue processing loop
+        self.master.after(100, self._process_queue_loop)
+        self.on_source_change(YOUTUBE_SOURCE)  # Initialize UI for YouTube
+
+    def _setup_window(self, master):
+        master.title("YouTube Downloader powered by yt-dlp")
+        master.geometry("600x650")  # Make window larger to accommodate download items
+        master.resizable(True, True)  # Allow resizing
         try:
             master.iconbitmap("ico.ico")
         except Exception:
             pass
 
-        self.main_frame = tk.Frame(master)
-        self.main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    def _create_widgets(self):
+        self.main_frame = tk.Frame(self.master, padx=10, pady=10)
+        self.main_frame.pack(fill="both", expand=True)
         self.main_frame.grid_columnconfigure(1, weight=1)
 
-        tk.Label(self.main_frame, text="Source:", font=("Inter", 10)).grid(row=0, column=0, sticky="w", padx=5)
-        self.source_var = tk.StringVar(value="YouTube")
-        self.source_menu = tk.OptionMenu(self.main_frame, self.source_var, "YouTube", "XtremeStream", command=self.on_source_change)
-        self.source_menu.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        # --- Input Section ---
+        input_frame = tk.LabelFrame(self.main_frame, text="Add New Download", font=MAIN_FONT, padx=10, pady=10)
+        input_frame.pack(fill="x", pady=5)
+        input_frame.grid_columnconfigure(1, weight=1)
 
-        self.referer_label = tk.Label(self.main_frame, text="Referer URL:", font=("Inter", 10))
-        self.referer_entry = tk.Entry(self.main_frame, font=("Inter", 10))
+        row_idx = 0
+        tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=row_idx, column=0, sticky="w", padx=5, pady=2)
+        self.source_var = tk.StringVar(value=YOUTUBE_SOURCE)
+        self.source_menu = tk.OptionMenu(input_frame, self.source_var, YOUTUBE_SOURCE, XTREAM_SOURCE,
+                                         command=self.on_source_change)
+        self.source_menu.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
 
-        tk.Label(self.main_frame, text="Target URL:", font=("Inter", 10)).grid(row=1, column=0, sticky="w", padx=5)
-        self.url_entry = tk.Entry(self.main_frame, font=("Inter", 10))
-        self.url_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        self.url_entry.bind("<Return>", self.start_download_on_enter)
+        row_idx += 1
+        self.referer_label = tk.Label(input_frame, text="Referer URL:", font=MAIN_FONT)
+        self.referer_entry = tk.Entry(input_frame, font=MAIN_FONT)
+        # These are initially hidden and shown by on_source_change
 
-        self.quality_label = tk.Label(self.main_frame, text="Quality:", font=("Inter", 10))
+        row_idx += 1
+        tk.Label(input_frame, text="Target URL:", font=MAIN_FONT).grid(row=row_idx, column=0, sticky="w", padx=5,
+                                                                       pady=2)
+        self.url_entry = tk.Entry(input_frame, font=MAIN_FONT)
+        self.url_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
+        self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
+
+        row_idx += 1
+        self.quality_label = tk.Label(input_frame, text="Quality:", font=MAIN_FONT)
         self.quality_var = tk.StringVar(value="High Quality - 1080p")
-        self.quality_menu = tk.OptionMenu(self.main_frame, self.quality_var, "Low Quality - 480p", "Medium Quality - 720p", "High Quality - 1080p")
-        self.quality_label.grid(row=2, column=0, sticky="w", padx=5)
-        self.quality_menu.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        self.quality_menu = tk.OptionMenu(input_frame, self.quality_var, "Low Quality - 480p", "Medium Quality - 720p",
+                                          "High Quality - 1080p")
+        self.quality_label.grid(row=row_idx, column=0, sticky="w", padx=5, pady=2)
+        self.quality_menu.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
 
-        tk.Label(self.main_frame, text="Output Filename (optional):", font=("Inter", 10)).grid(row=3, column=0, sticky="w", padx=5)
-        self.filename_entry = tk.Entry(self.main_frame, font=("Inter", 10))
-        self.filename_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        row_idx += 1
+        tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT).grid(row=row_idx, column=0,
+                                                                                       sticky="w", padx=5, pady=2)
+        self.filename_entry = tk.Entry(input_frame, font=MAIN_FONT)
+        self.filename_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
 
+        row_idx += 1
         self.mp3_var = tk.BooleanVar()
-        self.mp3_check = tk.Checkbutton(self.main_frame, text="Convert to MP3", variable=self.mp3_var, font=("Inter", 10))
-        self.mp3_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        self.mp3_check = tk.Checkbutton(input_frame, text="Convert to MP3", variable=self.mp3_var, font=MAIN_FONT)
+        self.mp3_check.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
-        self.button_frame = tk.Frame(self.main_frame)
-        self.button_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=10)
+        row_idx += 1
+        self.add_to_queue_button = tk.Button(input_frame, text="Add to Queue", command=self._add_current_to_queue,
+                                             bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT)
+        self.add_to_queue_button.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=10)
 
-        self.download_button = tk.Button(self.button_frame, text="Download", command=self.start_download_thread, bg="#4CAF50", fg="white", font=("Inter", 12, "bold"))
-        self.download_button.pack(side="left", expand=True, fill="x", padx=2)
+        # --- Queue Management Section ---
+        queue_control_frame = tk.Frame(self.main_frame)
+        queue_control_frame.pack(fill="x", pady=5)
 
-        self.abort_button = tk.Button(self.button_frame, text="Abort", command=self.abort_download, bg="#f44336", fg="white", font=("Inter", 12, "bold"), state="disabled")
-        self.abort_button.pack(side="left", expand=True, fill="x", padx=2)
+        self.start_queue_button = tk.Button(queue_control_frame, text="Start Queue",
+                                            command=self._start_queue_processing, bg=COLOR_START_QUEUE_BUTTON,
+                                            fg="white", font=BOLD_FONT)
+        self.start_queue_button.pack(side="left", expand=True, fill="x", padx=2)
 
-        self.restart_button = tk.Button(self.button_frame, text="Restart", command=self.restart_download, bg="#2196F3", fg="white", font=("Inter", 12, "bold"), state="disabled")
-        self.restart_button.pack(side="left", expand=True, fill="x", padx=2)
+        self.clear_queue_button = tk.Button(queue_control_frame, text="Clear Queue", command=self._clear_queue,
+                                            bg=COLOR_CLEAR_BUTTON, fg="black", font=BOLD_FONT)
+        self.clear_queue_button.pack(side="left", expand=True, fill="x", padx=2)
 
-        self.progress_bar = ttk.Progressbar(self.main_frame, orient="horizontal", mode="determinate")
-        self.progress_bar.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        # --- Download Items Display Area ---
+        download_items_label_frame = tk.LabelFrame(self.main_frame, text="Active & Queued Downloads", font=MAIN_FONT,
+                                                   padx=5, pady=5)
+        download_items_label_frame.pack(fill="both", expand=True, pady=5)
+        download_items_label_frame.grid_rowconfigure(0, weight=1)
+        download_items_label_frame.grid_columnconfigure(0, weight=1)
 
-        self.elapsed_label = tk.Label(self.main_frame, text="Elapsed: 00:00:00 | 0.0%", font=("Inter", 9))
-        self.elapsed_label.grid(row=7, column=0, sticky="w", padx=5)
+        self.download_canvas = tk.Canvas(download_items_label_frame, bg="white", highlightthickness=0)
+        self.download_canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.output_box = scrolledtext.ScrolledText(self.main_frame, wrap=tk.WORD, font=("Roboto", 9), height=5)
-        self.output_box.grid(row=8, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
-        self.output_box.config(state="disabled")
+        self.download_scroll_y = tk.Scrollbar(download_items_label_frame, orient="vertical",
+                                              command=self.download_canvas.yview)
+        self.download_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.download_canvas.config(yscrollcommand=self.download_scroll_y.set)
 
-        self.main_frame.grid_rowconfigure(8, weight=1)
+        self.download_items_frame = tk.Frame(self.download_canvas, bg="white")
+        self.download_canvas.create_window((0, 0), window=self.download_items_frame, anchor="nw",
+                                           width=self.download_canvas.winfo_width())
 
-        self.status_bar = tk.Label(master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=("Inter", 9), fg="black")
+        self.download_items_frame.bind("<Configure>", lambda e: self.download_canvas.configure(
+            scrollregion=self.download_canvas.bbox("all")))
+        self.download_canvas.bind("<Configure>", lambda e: self.download_canvas.itemconfig(
+            self.download_canvas.find_withtag("download_items_frame_id"), width=e.width))
+
+        # Tag the window created by create_window so we can update its width
+        self.download_canvas.create_window((0, 0), window=self.download_items_frame, anchor="nw",
+                                           tags="download_items_frame_id")
+        self.download_canvas.bind('<Configure>', self._on_canvas_resize)
+
+        # --- Status Bar ---
+        self.status_bar = tk.Label(self.master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=SMALL_FONT,
+                                   fg=COLOR_STATUS_READY)
         self.status_bar.pack(side="bottom", fill="x")
 
-        self.output_queue = queue.Queue()
-        self.current_process = None
-        self.start_time = None
+    def _on_canvas_resize(self, event):
+        """Adjusts the width of the inner frame when the canvas resizes."""
+        self.download_canvas.itemconfig("download_items_frame_id", width=event.width)
 
+    def _initialize_download_management(self):
+        self.queued_downloads = []  # List of DownloadItem objects awaiting execution
+        self.active_downloads = []  # List of DownloadItem objects currently running
+        self.download_item_counter = 0  # To give unique IDs to download items
+        self.completed_downloads_count = 0
+        self.total_downloads_added = 0
+        self.all_downloads_completed = threading.Event()  # Event to signal when all are done
+        self.all_downloads_completed.set()  # Initially set, as nothing is pending
+
+    def _configure_yt_dlp_path(self):
         if hasattr(sys, '_MEIPASS'):
             self.yt_dlp_path = os.path.join(sys._MEIPASS, 'yt-dlp.exe')
         else:
             self.yt_dlp_path = 'yt-dlp.exe'
 
-        self.master.after(100, self.poll_queues)
-        self.on_source_change("YouTube")
-
     def on_source_change(self, value):
-        if value == "YouTube":
+        """Adjusts UI based on selected source (YouTube or XtremeStream)."""
+        if value == YOUTUBE_SOURCE:
             self.referer_label.grid_forget()
             self.referer_entry.grid_forget()
             self.quality_label.grid()
             self.quality_menu.grid()
-        else:
+        else:  # XtremeStream
             self.quality_label.grid_forget()
             self.quality_menu.grid_forget()
-            self.referer_label.grid(row=2, column=0, sticky="w", padx=5)
-            self.referer_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+            # Find the correct row for referer entry (assuming it follows URL entry)
+            current_url_row = self.url_entry.grid_info()["row"]
+            self.referer_label.grid(row=current_url_row + 1, column=0, sticky="w", padx=5, pady=2)
+            self.referer_entry.grid(row=current_url_row + 1, column=1, sticky="ew", padx=5, pady=2)
 
-    def set_status(self, text, color="black"):
+    def _set_status(self, text, color="black"):
+        """Updates the main status bar."""
         self.status_bar.config(text=text, fg=color)
 
-    def start_download_thread(self):
+    def _add_current_to_queue(self):
+        """Adds the current input values as a new download item to the queue."""
         url = self.url_entry.get().strip()
         if not url:
             messagebox.showwarning("Input Error", "Target URL is required.")
             return
 
-        self.output_box.config(state="normal")
-        self.output_box.delete(1.0, END)
-        self.output_box.config(state="disabled")
+        # Basic URL validation (more robust regex could be used)
+        if not (url.startswith("http://") or url.startswith("https://")):
+            messagebox.showwarning("Input Error", "Invalid URL. Must start with http:// or https://")
+            return
 
-        self.set_status("Starting download...", "blue")
-        self.download_button.config(state="disabled")
-        self.abort_button.config(state="normal")
-        self.restart_button.config(state="disabled")
-        self.set_input_fields_state("disabled")
-        self.progress_bar.config(mode="determinate", value=0)
-        self.start_time = time.time()
+        source = self.source_var.get()
+        quality = self.quality_var.get()
+        filename = self.filename_entry.get().strip()
+        mp3_conversion = self.mp3_var.get()
+        referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
 
-        command = self.build_command(url)
-        threading.Thread(target=self.run_yt_dlp, args=(command,), daemon=True).start()
+        self.download_item_counter += 1
+        item_id = self.download_item_counter  # Unique ID for this download
 
-    def build_command(self, url):
-        command = [self.yt_dlp_path, url]
-        if self.source_var.get() == "XtremeStream" and self.referer_entry.get().strip():
-            command += ["--add-header", f"referer: {self.referer_entry.get().strip()}"]
+        # Create a new DownloadItem instance
+        new_item = DownloadItem(
+            self.download_items_frame, self, item_id, url, quality, filename, mp3_conversion, source, referer
+        )
+        self.queued_downloads.append(new_item)
+        self.total_downloads_added += 1
+        self.all_downloads_completed.clear()  # Clear the event, as new downloads are pending
 
-        downloads_dir = os.path.join(os.getcwd(), 'downloads')
-        temp_dir = os.path.join(downloads_dir, 'temp')
-        os.makedirs(temp_dir, exist_ok=True)
-        command += ["--paths", f"temp:{temp_dir}"]
+        self._set_status(f"Added '{url[:40]}...' to queue. Queue size: {len(self.queued_downloads)}",
+                         COLOR_STATUS_READY)
+        self._update_queue_control_buttons()
 
-        out_name = self.filename_entry.get().strip() or "%(title)s"
-        if self.mp3_var.get():
-            out_name += ".mp3"
-            command += ["--extract-audio", "--audio-format", "mp3"]
-        else:
-            out_name += ".mp4"
-            command += ["--recode-video", "mp4"]
+        # Clear input fields after adding
+        self.url_entry.delete(0, END)
+        self.filename_entry.delete(0, END)
+        if self.source_var.get() == XTREAM_SOURCE:
+            self.referer_entry.delete(0, END)
 
-        command += ["--output", os.path.join(downloads_dir, out_name)]
+        # Force canvas scroll to update to show new item
+        self.download_items_frame.update_idletasks()
+        self.download_canvas.yview_moveto(1.0)  # Scroll to bottom
 
-        if self.source_var.get() == "YouTube":
-            q = self.quality_var.get()
-            if "1080" in q:
-                command += ['-f', 'bestvideo[height>=1080]+bestaudio/best[height<=1080]']
-            elif "720" in q:
-                command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
-            elif "480" in q:
-                command += ['-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]']
+    def _add_to_queue_on_enter(self, event=None):
+        """Handler for 'Return' key press in URL entry."""
+        self._add_current_to_queue()
 
-        return command
+    def _start_queue_processing(self):
+        """Starts the background thread that processes the download queue."""
+        if not self.queued_downloads and not self.active_downloads:
+            messagebox.showinfo("Queue Empty", "No downloads in the queue to start.")
+            return
 
-    def run_yt_dlp(self, command):
-        self.output_queue.put(f"Executing: {' '.join(command)}\n")
-        try:
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            self.current_process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, creationflags=creationflags
-            )
-            for line in self.current_process.stdout:
-                self.output_queue.put(line)
-                percent = self.extract_percentage(line)
-                if percent is not None:
-                    self.progress_bar.config(value=percent)
-                    self.set_status("Downloading...", "blue")
-                if "ffmpeg" in line.lower() or "merging formats" in line.lower():
-                    self.set_status("Converting...", "blue")
+        self._set_status("Processing queue...", COLOR_STATUS_PROGRESS)
+        self._process_queue()  # Call it once to kick off
 
-            rc = self.current_process.wait()
-            if rc == 0:
-                self.set_status("Download Complete!", "green")
-                self.show_completion_alert()
-            else:
-                self.set_status(f"Failed (Exit {rc})", "red")
-        except Exception as e:
-            self.set_status(f"Error: {e}", "red")
-            self.output_queue.put(f"Error: {e}\n")
-        finally:
-            self.reset_ui()
-            shutil.rmtree(os.path.join(os.getcwd(), 'downloads', 'temp'), ignore_errors=True)
-
-    def abort_download(self):
-        if self.current_process:
+    def _process_queue_loop(self):
+        """Main loop for polling individual download item queues and managing concurrency."""
+        # Poll queues of active downloads
+        for item in list(self.active_downloads):  # Iterate over a copy to allow modification
             try:
-                self.current_process.kill()
-            except Exception:
+                while True:
+                    line = item.output_queue.get_nowait()
+                    # You could direct this output to a dedicated log/debug window if needed,
+                    # but for now, the progress bar and status label are the primary outputs per item.
+                    # This is mainly to drain the queue.
+                    # print(f"[{item.item_id}] {line.strip()}")
+                    pass
+            except queue.Empty:
                 pass
-        self.output_queue.put("\nProcess aborted by user.\n")
-        self.set_status("Download Aborted", "orange")
-        self.reset_ui()
 
-    def poll_queues(self):
-        try:
-            while True:
-                line = self.output_queue.get_nowait()
-                self.update_output(line)
-        except queue.Empty:
-            pass
+        # Check for slots and start new downloads
+        self._process_queue()
 
-        if self.start_time:
-            elapsed = int(time.time() - self.start_time)
-            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
-            percent = self.progress_bar['value']
-            self.elapsed_label.config(text=f"Elapsed: {h:02}:{m:02}:{s:02} | {percent:.1f}%")
+        # Check if all downloads are finished
+        if not self.queued_downloads and not self.active_downloads and not self.all_downloads_completed.is_set():
+            self.all_downloads_completed.set()  # Signal completion
+            self._show_overall_completion_alert()
+            self._set_status("All downloads complete!", COLOR_STATUS_COMPLETE)
+            self.total_downloads_added = 0  # Reset total count
+            self.completed_downloads_count = 0
 
-        self.master.after(100, self.poll_queues)
+        self.master.after(100, self._process_queue_loop)  # Schedule next poll
 
-    def update_output(self, text):
-        self.output_box.config(state="normal")
-        self.output_box.insert(END, text)
-        self.output_box.see(END)
-        self.output_box.config(state="disabled")
+    def _process_queue(self):
+        """Checks for available slots and starts downloads from the queue."""
+        while len(self.active_downloads) < MAX_CONCURRENT_DOWNLOADS and self.queued_downloads:
+            next_item = self.queued_downloads.pop(0)  # Get the first item from the queue
+            self.active_downloads.append(next_item)
+            next_item.start_download()  # Start its process in a new thread
+            self._set_status(f"Starting download for '{next_item.url[:40]}...'. Active: {len(self.active_downloads)}",
+                             COLOR_STATUS_PROGRESS)
+            self._update_queue_control_buttons()
 
-    def extract_percentage(self, line):
-        try:
-            parts = line.split()
-            for part in parts:
-                if part.endswith('%'):
-                    value = float(part.strip('%'))
-                    return value
-        except Exception:
-            pass
-        return None
+    def download_finished(self, item_id, success):
+        """Callback from DownloadItem when it finishes."""
+        item_to_remove = None
+        for item in self.active_downloads:
+            if item.item_id == item_id:
+                item_to_remove = item
+                break
 
-    def reset_ui(self):
-        self.download_button.config(state="normal")
-        self.abort_button.config(state="disabled")
-        self.restart_button.config(state="normal")
-        self.progress_bar.stop()
-        self.progress_bar.config(value=0, mode="determinate")
-        self.set_input_fields_state("normal")
-        self.start_time = None
-        if "Download" not in self.status_bar.cget("text"):
-            self.set_status("Ready", "black")
+        if item_to_remove:
+            self.active_downloads.remove(item_to_remove)
+            self.completed_downloads_count += 1
+            # Schedule the UI removal after a short delay so user can see final status
+            self.master.after(2000, lambda: self._remove_download_item_ui(item_to_remove))
 
-    def set_input_fields_state(self, state):
-        for widget in [self.url_entry, self.filename_entry, self.source_menu, self.mp3_check, self.quality_menu, self.referer_entry]:
-            widget.config(state=state)
+        self._update_queue_control_buttons()
+        # The _process_queue_loop will handle kicking off new downloads and overall completion alert
 
-    def restart_download(self):
-        self.start_download_thread()
+    def _remove_download_item_ui(self, item):
+        """Removes a download item's UI frame."""
+        item.frame.destroy()
+        # This is important to allow the scrollbar to update correctly
+        self.download_items_frame.update_idletasks()
+        self.download_canvas.config(scrollregion=self.download_canvas.bbox("all"))
 
-    def show_completion_alert(self):
-        if messagebox.askokcancel("Download Complete", "The download has finished. Open download folder?"):
-            os.startfile(os.path.join(os.getcwd(), 'downloads'))
+    def remove_from_queue(self, item_id):
+        """Removes a pending download item from the queue if aborted before starting."""
+        item_to_remove = None
+        for item in self.queued_downloads:
+            if item.item_id == item_id:
+                item_to_remove = item
+                break
+        if item_to_remove:
+            self.queued_downloads.remove(item_to_remove)
+            self.completed_downloads_count += 1  # Count it as completed (aborted) for overall alert
+            self._set_status(f"Removed '{item_to_remove.url[:40]}...' from queue.", COLOR_STATUS_ABORTED)
+            self.master.after(500, lambda: self._remove_download_item_ui(item_to_remove))
+            self._update_queue_control_buttons()
 
-    def start_download_on_enter(self, event=None):
-        self.start_download_thread()
+    def _clear_queue(self):
+        """Clears all pending downloads from the queue and resets the UI."""
+        if self.active_downloads:
+            if not messagebox.askyesno("Clear Queue", "There are active downloads. Abort all active and clear queue?"):
+                return
+            # Abort all active first
+            for item in list(self.active_downloads):  # Iterate over copy
+                item.abort_download()  # This will eventually call download_finished
+
+        # Clear queued downloads
+        for item in self.queued_downloads:
+            item.frame.destroy()  # Immediately remove UI for queued items
+        self.queued_downloads.clear()
+        self.total_downloads_added = 0
+        self.completed_downloads_count = 0
+        self.all_downloads_completed.set()  # Reset completion event
+
+        self._set_status("Queue cleared. All active downloads aborted.", COLOR_STATUS_ABORTED)
+        self._update_queue_control_buttons()
+        self.download_items_frame.update_idletasks()
+        self.download_canvas.config(scrollregion=self.download_canvas.bbox("all"))
+
+    def _update_queue_control_buttons(self):
+        """Enables/disables queue control buttons based on queue/active status."""
+        start_enabled = bool(self.queued_downloads) and (len(self.active_downloads) < MAX_CONCURRENT_DOWNLOADS)
+        clear_enabled = bool(self.queued_downloads) or bool(self.active_downloads)
+
+        self.start_queue_button.config(state="normal" if start_enabled else "disabled")
+        self.clear_queue_button.config(state="normal" if clear_enabled else "disabled")
+
+    def _show_overall_completion_alert(self):
+        """Shows a single alert when all downloads are finished."""
+        messagebox.showinfo("All Downloads Complete", "All items in the queue have finished downloading!")
+        # Optionally open the downloads folder here
+        if messagebox.askyesno("Open Folder", "Open the main downloads folder?"):
+            downloads_path = os.path.join(os.getcwd(), DOWNLOADS_DIR)
+            if os.path.exists(downloads_path):
+                os.startfile(downloads_path)
+            else:
+                messagebox.showerror("Error", f"Downloads folder not found: {downloads_path}")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = YTDLPGUIApp(root)
     root.mainloop()
+
