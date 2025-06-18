@@ -80,9 +80,8 @@ class DownloadItem:
 
         self.frame = None  # Will be created in _build_frame_widgets
 
-        # If loading from history, status is already set. If new, it's 'queued'.
-        self.update_status(self.status, self._get_status_color(self.status))
-        self._update_title_label()  # Ensure title is set correctly on init
+        # Removed direct calls to update_status and _update_title_label here.
+        # These will be called by _refresh_display_order after widgets are built.
 
         # For new items (added via UI), fetch title. For loaded history, title is already there.
         if self.is_active_item and not self.filename_provided_by_user and not self.is_title_fetched:
@@ -157,10 +156,6 @@ class DownloadItem:
             # For finished items, ensure abort button is disabled (should already be hidden anyway)
             if hasattr(self, 'abort_button') and self.abort_button.winfo_exists():
                 self.abort_button.config(state="disabled")
-
-        # Update labels with current item data
-        self._update_title_label()
-        self.update_status(self.status, self._get_status_color(self.status))
 
     def _get_status_color(self, status_text):
         """Returns the color based on status text."""
@@ -269,17 +264,23 @@ class DownloadItem:
 
         # Labels are dynamically configured by _build_frame_widgets based on is_active_item
         # This function just updates the text content of the labels that are currently visible
-        self.title_label.config(text=f"{display_name} ({self.source})")
-        self.date_added_label.config(text=f"Added: {self.date_added}")
+        # Ensure the widget exists before trying to configure it
+        if self.title_label.winfo_exists():
+            self.title_label.config(text=f"{display_name} ({self.source})")
+        if self.date_added_label.winfo_exists():
+            self.date_added_label.config(text=f"Added: {self.date_added}")
 
         if not self.is_active_item:
             display_url = self.url
             if len(display_url) > 70:
                 display_url = display_url[:67] + "..."
-            self.url_label.config(text=f"URL: {display_url}")
-            self.date_completed_label.config(text=f"Completed: {self.date_completed}")
-            self.elapsed_time_label.config(
-                text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds)}")
+            if self.url_label.winfo_exists():
+                self.url_label.config(text=f"URL: {display_url}")
+            if self.date_completed_label.winfo_exists():
+                self.date_completed_label.config(text=f"Completed: {self.date_completed}")
+            if self.elapsed_time_label.winfo_exists():
+                self.elapsed_time_label.config(
+                    text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds)}")
 
     def start_download(self):
         """Starts the yt-dlp process for this item in a new thread."""
@@ -292,12 +293,16 @@ class DownloadItem:
         self.is_active_item = True
         self.app_instance._refresh_display_order()
 
-        self.abort_button.config(state="normal")
-        self.progress_bar.config(value=0)
-        self.progress_bar.config(mode="determinate")
+        # Check if button and progress bar exist before configuring
+        if self.abort_button.winfo_exists():
+            self.abort_button.config(state="normal")
+        if self.progress_bar.winfo_exists():
+            self.progress_bar.config(value=0)
+            self.progress_bar.config(mode="determinate")
 
         # Initial elapsed time display for active downloads
-        self.elapsed_time_label.config(text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(0)}")
+        if self.elapsed_time_label.winfo_exists():
+            self.elapsed_time_label.config(text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(0)}")
 
         command = self._build_command()
         threading.Thread(target=self._run_yt_dlp, args=(command,), daemon=True).start()
@@ -329,8 +334,6 @@ class DownloadItem:
                 command += ['-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]']
             elif self.quality == "Medium Quality - 720p":
                 command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
-            elif self.quality == "Low Quality - 480p":
-                command += ['-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]']
             elif "Combined" in self.quality:
                 res = re.search(r'(\d+)p', self.quality).group(1)
                 command += ['-f', f'bestvideo[height<={res}]+bestaudio/best[height<={res}]']
@@ -370,7 +373,8 @@ class DownloadItem:
             rc = self.process.wait()
             # Stop indeterminate progress bar if it was running
             if self.is_merging:
-                self.progress_bar.stop()
+                if self.progress_bar.winfo_exists():
+                    self.progress_bar.stop()
 
             if self.is_aborted:
                 final_status = "aborted"
@@ -378,7 +382,8 @@ class DownloadItem:
             elif rc == 0:
                 final_status = "completed"
                 self.update_status("completed", COLOR_STATUS_COMPLETE)
-                self.progress_bar.config(value=100, mode="determinate")
+                if self.progress_bar.winfo_exists():
+                    self.progress_bar.config(value=100, mode="determinate")
             else:
                 final_status = "failed"
                 self.update_status("failed", COLOR_STATUS_FAILED)
@@ -389,7 +394,7 @@ class DownloadItem:
             if self.app_instance.log_window_visible and self.app_instance.log_text:
                 self.app_instance.master.after(0, lambda: self._append_to_log(
                     "ERROR: yt-dlp.exe not found or not in PATH.\n"))
-            print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for download of URL: {self.url}")
+            print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for URL: {self.url}")
         except Exception as e:
             final_status = "failed"
             self.update_status("failed", COLOR_STATUS_FAILED)
@@ -423,11 +428,13 @@ class DownloadItem:
             if percent_str:
                 percent = float(percent_str)
                 if self.is_merging:
-                    self.progress_bar.stop()
-                    self.progress_bar.config(mode="determinate")
+                    if self.progress_bar.winfo_exists():
+                        self.progress_bar.stop()
+                        self.progress_bar.config(mode="determinate")
                     self.is_merging = False
 
-                self.progress_bar.config(value=percent)
+                if self.progress_bar.winfo_exists():
+                    self.progress_bar.config(value=percent)
 
                 speed_match = re.search(r'at\s+([0-9\.]+[KMG]?iB/s|\S+)(?:\s+ETA\s+(\d{2}:\d{2}))?', line)
                 speed = speed_match.group(1) if speed_match and speed_match.group(1) else 'N/A'
@@ -439,8 +446,9 @@ class DownloadItem:
         if "merging formats" in line.lower() or "ffmpeg" in line.lower() or "postprocessing" in line.lower() or "extractaudio" in line.lower():
             if not self.is_merging:
                 self.update_status("Converting/Merging...", COLOR_STATUS_PROGRESS)
-                self.progress_bar.config(mode="indeterminate")
-                self.progress_bar.start()
+                if self.progress_bar.winfo_exists():
+                    self.progress_bar.config(mode="indeterminate")
+                    self.progress_bar.start()
                 self.is_merging = True
             return
 
@@ -679,29 +687,34 @@ class YTDLPGUIApp:
         self.clear_history_button.pack(side="left", expand=True, fill="x", padx=2)
 
         # --- Combined Downloads Display Area ---
-        # Removed ttk.Notebook and combined tabs
-        self.downloads_canvas = tk.Canvas(self.main_frame, bg="white", highlightthickness=0)
-        self.downloads_canvas.pack(fill="both", expand=True, pady=5)
-        self.downloads_canvas.grid_rowconfigure(0, weight=1)  # Ensure canvas expands
-        self.downloads_canvas.grid_columnconfigure(0, weight=1)
+        # Create a frame to hold the canvas and scrollbar using grid
+        self.display_area_frame = tk.Frame(self.main_frame)
+        self.display_area_frame.pack(fill="both", expand=True, pady=5)
+        self.display_area_frame.grid_rowconfigure(0, weight=1)
+        self.display_area_frame.grid_columnconfigure(0, weight=1)  # Canvas column, takes available space
+        self.display_area_frame.grid_columnconfigure(1, weight=0)  # Scrollbar column, takes minimum space
 
-        self.downloads_scroll_y = tk.Scrollbar(self.downloads_canvas, orient="vertical",
+        self.downloads_canvas = tk.Canvas(self.display_area_frame, bg="white", highlightthickness=0)
+        self.downloads_canvas.grid(row=0, column=0, sticky="nsew")  # Canvas fills its grid cell
+
+        self.downloads_scroll_y = tk.Scrollbar(self.display_area_frame, orient="vertical",
                                                command=self.downloads_canvas.yview)
-        self.downloads_scroll_y.pack(side="right", fill="y")
+        self.downloads_scroll_y.grid(row=0, column=1, sticky="ns")  # Scrollbar next to canvas
+
         self.downloads_canvas.config(yscrollcommand=self.downloads_scroll_y.set)
 
         self.downloads_frame_inner = tk.Frame(self.downloads_canvas, bg="white")
+        # Set initial width to 0, it will be immediately updated by _on_downloads_canvas_resize
         self.downloads_canvas_window_id = self.downloads_canvas.create_window((0, 0), window=self.downloads_frame_inner,
-                                                                              anchor="nw",
-                                                                              width=self.downloads_canvas.winfo_width())
+                                                                              anchor="nw", width=0)
 
         self.downloads_frame_inner.bind("<Configure>", lambda e: self.downloads_canvas.configure(
             scrollregion=self.downloads_canvas.bbox("all")))
         self.downloads_canvas.bind('<Configure>', self._on_downloads_canvas_resize)
         # Added mouse wheel scrolling for the combined downloads display
-        self.downloads_canvas.bind('<MouseWheel>', self._on_mousewheel)  # Windows/macOS
-        self.downloads_canvas.bind('<Button-4>', self._on_mousewheel)  # Linux scroll up
-        self.downloads_canvas.bind('<Button-5>', self._on_mousewheel)  # Linux scroll down
+        self.downloads_canvas.bind('<MouseWheel>', self._on_mousewheel)
+        self.downloads_canvas.bind('<Button-4>', self._on_mousewheel)
+        self.downloads_canvas.bind('<Button-5>', self._on_mousewheel)
 
         # --- Status Bar ---
         self.status_bar = tk.Label(self.master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=SMALL_FONT,
@@ -715,6 +728,7 @@ class YTDLPGUIApp:
 
     def _on_downloads_canvas_resize(self, event):
         """Adjusts the width of the inner frame when the canvas resizes."""
+        # event.width now refers to the total width of the canvas, which is the usable width for the inner frame
         self.downloads_canvas.itemconfig(self.downloads_canvas_window_id, width=event.width)
         self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
 
@@ -729,7 +743,9 @@ class YTDLPGUIApp:
         self.completed_downloads_count = 0
         self.total_downloads_added = 0
         self.is_queue_processing_active = False
+
         self.all_downloads_completed = threading.Event()
+        self.alert_on_completion_for_session = False  # New flag to control session-based alerts
 
     def _configure_yt_dlp_path(self):
         if hasattr(sys, '_MEIPASS'):
@@ -825,6 +841,10 @@ class YTDLPGUIApp:
         self._set_status(f"Added '{url[:40]}...' to queue. Queue size: {len(self.queued_downloads)}",
                          COLOR_STATUS_READY)
         self._update_queue_control_buttons()
+
+        # Set flag for session-based completion alert and clear event
+        self.alert_on_completion_for_session = True
+        self.all_downloads_completed.clear()
 
         # Clear input fields after adding
         self.url_entry.delete(0, END)
@@ -1029,17 +1049,9 @@ class YTDLPGUIApp:
             self._process_queue()
         else:
             self.is_queue_processing_active = False
-
-            # Only show completion alert if processing was active AND now all are done.
-        if not self.is_queue_processing_active and not self.queued_downloads and not self.active_downloads:
-            if not self.all_downloads_completed.is_set():
-                self.all_downloads_completed.set()
-                self._show_overall_completion_alert()
-                self._set_status("All downloads complete!", COLOR_STATUS_COMPLETE)
-                self.total_downloads_added = 0
-                self.completed_downloads_count = 0
-                self.is_queue_processing_active = False
-                self._update_queue_control_buttons()
+            # Only update status bar to "Ready" if nothing is pending and no completion alert is due
+            if self.status_bar.cget("text") != "All downloads complete!":
+                self._set_status("Ready", COLOR_STATUS_READY)
 
         self.master.after(100, self._process_queue_loop)
 
@@ -1190,6 +1202,13 @@ class YTDLPGUIApp:
         self._update_queue_control_buttons()
         self._process_queue()
 
+        # Check if all downloads for this session are complete and alert is due
+        if not self.active_downloads and not self.queued_downloads:
+            if self.alert_on_completion_for_session and not self.all_downloads_completed.is_set():
+                self.all_downloads_completed.set()
+                self._show_overall_completion_alert()
+                self.alert_on_completion_for_session = False  # Reset for next batch of downloads
+
     def _add_to_local_history(self, item_obj):
         """Adds a finished download item to the local history list and saves to file."""
         history_entry = {
@@ -1276,6 +1295,7 @@ class YTDLPGUIApp:
         self.completed_downloads_count = 0
         self.is_queue_processing_active = False
         self.all_downloads_completed.set()
+        self.alert_on_completion_for_session = False  # No alert after clearing
 
         self._set_status("Queue cleared. All active/queued downloads aborted/cancelled.", COLOR_STATUS_ABORTED)
         self._update_queue_control_buttons()
