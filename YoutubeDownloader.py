@@ -9,6 +9,7 @@ import shutil
 import time
 import re
 import json  # For parsing local history JSON
+import tkinter.font  # Import the font module
 
 # --- Constants for consistent naming and values --
 DOWNLOADS_DIR = "downloads"
@@ -97,99 +98,98 @@ class DownloadItem:
         if self.frame and self.frame.winfo_exists():
             self.frame.destroy()
 
-        self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=5, pady=5, bg="#f0f0f0")
-        # Column 0: Title/URL (expands)
-        # Column 1: Progress (fixed)
-        # Column 2: Date Added (fixed)
-        # Column 3: Time Elapsed (fixed)
-        # Column 4: Status (fixed) (for active items, this is for overall text updates from parse_output)
-        # Column 5: Buttons (fixed)
-        self.frame.columnconfigure(0, weight=1)
-        self.frame.columnconfigure(1, weight=0)
-        self.frame.columnconfigure(2, weight=0)
-        self.frame.columnconfigure(3, weight=0)
-        self.frame.columnconfigure(4, weight=0)  # Status or Date Completed
-        self.frame.columnconfigure(5, weight=0)  # Buttons
+        self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=2, pady=2, bg="#f0f0f0")
+        # Columns: Name (0), URL (1), Status/Progress (2), Date Added (3), Date Completed (4), Time/ETA (5), Action (6)
+        # These weights should align with the header weights and the desired distribution.
+        self.frame.columnconfigure(0, weight=3)  # Name
+        self.frame.columnconfigure(1, weight=4)  # URL
+        self.frame.columnconfigure(2, weight=2)  # Status/Progress
+        self.frame.columnconfigure(3, weight=1)  # Date Added
+        self.frame.columnconfigure(4, weight=1)  # Date Completed
+        self.frame.columnconfigure(5, weight=1)  # Time/ETA
+        self.frame.columnconfigure(6, weight=1)  # Action
 
-        # Adjusted wraplengths and widths for better fit in the wider window
-        self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", wraplength=400,
-                                    # Increased wraplength for title
-                                    justify="left")
-        self.url_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0", wraplength=500,
-                                  # Increased wraplength for URL
-                                  justify="left")
-        self.status_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
-                                     fg=COLOR_STATUS_READY, width=15,
-                                     wraplength=0)  # Fixed width for status, no wrapping
+        # Name (video title or filename)
+        # wraplength will be set dynamically by _update_title_label
+        self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", justify="left")
+        self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
 
-        # Increased width and explicitly set wraplength=0 to prevent wrapping
-        self.date_added_label = tk.Label(self.frame, text=f"Added: {self.date_added}", font=SMALL_FONT, anchor="w",
-                                         bg="#f0f0f0", width=12, wraplength=0)
-        self.date_completed_label = tk.Label(self.frame, text=f"Completed: {self.date_completed}", font=SMALL_FONT,
-                                             anchor="w", bg="#f0f0f0", width=12, wraplength=0)
-        self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
-                                           width=9, wraplength=0)
+        # URL (clipped/wrapped) - Removed "URL:" prefix
+        # wraplength will be set dynamically by _update_title_label
+        self.url_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0", justify="left")
+        self.url_label.grid(row=0, column=1, sticky="nw", padx=2, pady=0)
 
-        self.progress_bar = ttk.Progressbar(self.frame, orient="horizontal", mode="determinate",
-                                            length=150)  # Slightly increased length
-        self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
-                                      fg="white", font=SMALL_FONT, width=10)  # Increased button width
+        # Status/Progress (combined column)
+        self.status_progress_frame = tk.Frame(self.frame, bg="#f0f0f0")
+        self.status_progress_frame.grid(row=0, column=2, sticky="nsew", padx=2, pady=0)
+        self.status_progress_frame.columnconfigure(0, weight=1)
 
-        self.open_file_button = tk.Button(self.frame, text="Open File", command=self._open_file_location,
-                                          bg=COLOR_OPEN_FILE_BUTTON, fg="white", font=SMALL_FONT,
-                                          width=12)  # Increased button width
-        self.retry_button = tk.Button(self.frame, text="Retry", command=self.retry_download,
-                                      bg=COLOR_ADD_BUTTON, fg="white", font=SMALL_FONT,
-                                      width=12)  # Increased button width
+        # Progress bar setup (common for both active/inactive to allow hiding/showing)
+        self.progress_bar = ttk.Progressbar(self.status_progress_frame, orient="horizontal", mode="determinate",
+                                            length=120)
+        # Status label, initial setup
+        self.status_label = tk.Label(self.status_progress_frame, text="", font=SMALL_FONT, anchor="center",
+                                     fg=self._get_status_color(self.status), bg="#f0f0f0", width=14)
 
         if self.is_active_item:
-            # Layout for active/queued items: title - progress bar - added - time elapsed - abort button
-            # All on row 0, using new columns for better spacing
-            self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
-            self.progress_bar.grid(row=0, column=1, sticky="ew", padx=2, pady=0)
-            self.date_added_label.grid(row=0, column=2, sticky="nw", padx=2, pady=0)
-            self.elapsed_time_label.grid(row=0, column=3, sticky="nw", padx=2, pady=0)
-            self.abort_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
-            # Status text for active items will update the title label if needed, or primarily in log
-            self.status_label.grid_forget()
-            self.url_label.grid_forget()
-            self.date_completed_label.grid_forget()
-            self.open_file_button.grid_forget()
-            self.retry_button.grid_forget()
+            self.progress_bar.grid(row=0, column=0, sticky="ew")
+            self.status_label.place(relx=0.5, rely=0.5, anchor="center")  # Overlay
         else:
-            # Layout for finished/errored items:
-            # Row 0: title (full width)
-            # Row 1: URL (full width)
-            # Row 2: Status - Added Date - Completed Date - Time Elapsed - (Open File / Retry)
-            self.title_label.grid(row=0, column=0, columnspan=6, sticky="nw", padx=2, pady=0)  # Spanning all columns
-            self.url_label.grid(row=1, column=0, columnspan=6, sticky="nw", padx=2, pady=0)  # Spanning all columns
-            # Reduced padx for closer packing
-            self.status_label.grid(row=2, column=0, sticky="w", padx=0, pady=0)
-            self.date_added_label.grid(row=2, column=1, sticky="w", padx=0, pady=0)
-            self.date_completed_label.grid(row=2, column=2, sticky="w", padx=0, pady=0)
-            self.elapsed_time_label.grid(row=2, column=3, sticky="w", padx=0, pady=0)
+            self.progress_bar.grid_forget()  # Hide progress bar for inactive items
+            self.status_label.grid(row=0, column=0, sticky="ew")  # Show status label directly
 
-            # Conditionally show Open File or Retry button
+        # Date Added - Removed "Added:" prefix, adjusted width
+        self.date_added_label = tk.Label(self.frame, text=self.date_added, font=SMALL_FONT, anchor="w", bg="#f0f0f0",
+                                         width=10)  # Reduced width slightly
+        self.date_added_label.grid(row=0, column=3, sticky="w", padx=2, pady=0)
+
+        # Date Completed - Removed "Completed:" prefix, adjusted width
+        self.date_completed_label = tk.Label(self.frame, text=self.date_completed, font=SMALL_FONT, anchor="w",
+                                             bg="#f0f0f0", width=10)  # Reduced width slightly
+        self.date_completed_label.grid(row=0, column=4, sticky="w", padx=2, pady=0)
+
+        # Time/ETA - Removed "Time:" prefix, adjusted width
+        self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
+                                           width=8)  # Reduced width slightly
+        self.elapsed_time_label.grid(row=0, column=5, sticky="w", padx=2, pady=0)
+
+        # Action buttons
+        self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
+                                      fg="white", font=SMALL_FONT, width=8)
+        self.open_file_button = tk.Button(self.frame, text="Open File", command=self._open_file_location,
+                                          bg=COLOR_OPEN_FILE_BUTTON, fg="white", font=SMALL_FONT, width=10)
+        self.retry_button = tk.Button(self.frame, text="Retry", command=self.retry_download, bg=COLOR_ADD_BUTTON,
+                                      fg="white", font=SMALL_FONT, width=10)
+
+        # Action button placement in the last column (column 6)
+        if self.is_active_item:
+            self.abort_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)
+        else:
             if self.status in ['failed', 'aborted', 'cancelled']:
-                self.retry_button.grid(row=2, column=5, sticky="e", padx=2, pady=0)  # Moved to last column
-                self.open_file_button.grid_forget()
+                self.retry_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)
             elif self.status == 'completed':
-                self.open_file_button.grid(row=2, column=5, sticky="e", padx=2, pady=0)  # Moved to last column
-                self.retry_button.grid_forget()
-            else:
-                self.open_file_button.grid_forget()
-                self.retry_button.grid_forget()
+                self.open_file_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)
 
-            self.progress_bar.grid_forget()
-            self.abort_button.grid_forget()
+        # Ensure correct visibility of progress bar/status label based on item state
+        self._update_progress_visibility()
 
-            # Set progress bar for display only (not functional for history items)
-            if self.status == 'completed':
-                self.progress_bar.config(value=100, mode="determinate")
-            else:
-                self.progress_bar.config(value=0, mode="determinate")
-            if hasattr(self, 'abort_button') and self.abort_button.winfo_exists():
-                self.abort_button.config(state="disabled")
+    def _update_progress_visibility(self):
+        """Manages the visibility of the progress bar and status label based on item state."""
+        if self.is_active_item:
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+                self.progress_bar.lift()  # Ensure progress bar is on top
+            if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+                # Place over progress bar if active
+                self.status_label.place(relx=0.5, rely=0.5, anchor="center")
+                # Make background transparent to show progress bar
+                self.status_label.config(bg="#f0f0f0")  # Match parent frame background
+        else:
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+                self.progress_bar.grid_forget()  # Hide progress bar
+            if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+                self.status_label.place_forget()  # Remove place geometry manager
+                self.status_label.grid(row=0, column=0, sticky="ew")  # Use grid for non-overlay
+                self.status_label.config(bg="#f0f0f0")  # Ensure consistent background
 
     def _get_status_color(self, status_text):
         """Returns the color based on status text."""
@@ -287,31 +287,111 @@ class DownloadItem:
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _update_title_label(self):
-        """Updates the title label on the UI with the fetched title."""
-        display_name = self.video_title if self.video_title and self.video_title != 'Fetching Title...' else (
-            os.path.basename(self.filename) if self.filename else self.url)
-        # Clip title for display if too long
-        if len(display_name) > 60:  # Adjusted clipping length for better fit
-            display_name = display_name[:57] + "..."
+        """
+        Updates the title and URL labels on the UI with fetched info,
+        and sets wraplength dynamically based on column width,
+        with explicit clipping if still too long.
+        """
+        # Ensure the frame has been mapped and laid out before trying to get its dimensions.
+        self.frame.update_idletasks()
+
+        # Get the total width of the inner downloads frame (which is the canvas width)
+        # This gives us the total available width for all columns.
+        total_frame_width = self.app_instance.downloads_canvas.winfo_width()
+        if total_frame_width == 0:  # Fallback if not yet rendered
+            total_frame_width = 900  # A reasonable guess based on the 1000px main window minus padding
+
+        # Define the relative widths based on column weights (3:4:2:1:1:1:1 for 7 columns)
+        # Sum of weights: 3+4+2+1+1+1+1 = 13
+        name_col_ratio = 3 / 13
+        url_col_ratio = 4 / 13
+
+        # More aggressive safety margin to ensure text doesn't overflow
+        # This accounts for internal padding, borders, and ellipsis
+        safety_margin_px = 30
+
+        name_column_pixel_width = int(total_frame_width * name_col_ratio) - safety_margin_px
+        url_column_pixel_width = int(total_frame_width * url_col_ratio) - safety_margin_px
+
+        # Ensure minimum width to prevent negative wraplength
+        name_column_pixel_width = max(10, name_column_pixel_width)
+        url_column_pixel_width = max(10, url_column_pixel_width)
+
+        # Set wraplength for labels - this primarily handles word wrapping
+        self.title_label.config(wraplength=name_column_pixel_width)
+        self.url_label.config(wraplength=url_column_pixel_width)
+
+        # --- Update and Truncate Title Label ---
+        # Prioritize error status if it's an error status
+        if "Error" in self.video_title or self.status in ['failed', 'aborted', 'cancelled']:
+            display_name_raw = f"{self.status.capitalize()}: {self.video_title}"
+        else:
+            display_name_raw = self.video_title if self.video_title and self.video_title != 'Fetching Title...' else (
+                os.path.basename(self.filename) if self.filename else self.url)
+
+        # Add source in parentheses
+        display_name_full = f"{display_name_raw} ({self.source})"
+
+        # Manual truncation with ellipsis for single-line fit (even after wraplength)
+        # Create a Font object for accurate measurement
+        font_obj = tkinter.font.Font(family=MAIN_FONT[0], size=MAIN_FONT[1])
+
+        text_width_px = font_obj.measure(display_name_full)
+
+        if text_width_px > name_column_pixel_width:
+            truncated_text = ""
+            for i in range(len(display_name_full)):
+                test_text = display_name_full[:i + 1] + "..."
+                if font_obj.measure(test_text) > name_column_pixel_width:
+                    truncated_text = display_name_full[:i] + "..."  # Go back one char if it overflows
+                    break
+            if not truncated_text:  # If loop completes without breaking (meaning it fits perfectly)
+                truncated_text = display_name_full
+            display_name_final = truncated_text
+        else:
+            display_name_final = display_name_full
 
         if self.title_label.winfo_exists():
-            self.title_label.config(text=f"{display_name} ({self.source})")
-        if self.date_added_label.winfo_exists():
-            # Ensure the "Added:" prefix is handled correctly without wrapping itself
-            self.date_added_label.config(text=f"Added: {self.date_added}")
+            self.title_label.config(text=display_name_final)
 
-        if not self.is_active_item:
-            display_url = self.url
-            # Clip URL for display if too long
-            if len(display_url) > 70:  # Adjusted clipping length for better fit
-                display_url = display_url[:67] + "..."
-            if self.url_label.winfo_exists():
-                self.url_label.config(text=f"URL: {display_url}")
-            if self.date_completed_label.winfo_exists():
-                self.date_completed_label.config(text=f"Completed: {self.date_completed}")
-            if self.elapsed_time_label.winfo_exists():
-                self.elapsed_time_label.config(
-                    text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds)}")
+        # --- Update and Truncate URL Label ---
+        if self.is_active_item:
+            # For active items, URL column might be less critical or used differently
+            # We can choose to show less of the URL or omit it entirely if needed.
+            # For now, let's just make it empty for active items to prioritize status/progress.
+            display_url_final = ""
+        else:
+            display_url_raw = self.url
+            font_url_obj = tkinter.font.Font(family=SMALL_FONT[0], size=SMALL_FONT[1])
+
+            url_text_width_px = font_url_obj.measure(display_url_raw)
+
+            if url_text_width_px > url_column_pixel_width:
+                truncated_url = ""
+                for i in range(len(display_url_raw)):
+                    test_url = display_url_raw[:i + 1] + "..."
+                    if font_url_obj.measure(test_url) > url_column_pixel_width:
+                        truncated_url = display_url_raw[:i] + "..."
+                        break
+                if not truncated_url:
+                    truncated_url = display_url_raw
+                display_url_final = truncated_url
+            else:
+                display_url_final = display_url_raw
+
+        # No need to destroy font objects, they are automatically managed when out of scope.
+
+        if self.url_label.winfo_exists():
+            self.url_label.config(text=display_url_final)
+
+        # Update other labels (Date Added, Date Completed, Elapsed Time)
+        if self.date_added_label.winfo_exists():
+            self.date_added_label.config(text=self.date_added)
+        if self.date_completed_label.winfo_exists():
+            self.date_completed_label.config(text=self.date_completed)
+        if self.elapsed_time_label.winfo_exists():
+            self.elapsed_time_label.config(
+                text=self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds))
 
     def start_download(self):
         """Starts the yt-dlp process for this item in a new thread."""
@@ -323,14 +403,17 @@ class DownloadItem:
         self.is_active_item = True
         self.app_instance._refresh_display_order()
 
+        # Check if progress_bar and status_label exist before configuring
+        if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+            self.progress_bar.config(value=0, mode="determinate")
+        if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+            self.status_label.config(bg="#f0f0f0")  # Ensure transparent background when active
+
         if self.abort_button.winfo_exists():
             self.abort_button.config(state="normal")
-        if self.progress_bar.winfo_exists():
-            self.progress_bar.config(value=0)
-            self.progress_bar.config(mode="determinate")
-
         if self.elapsed_time_label.winfo_exists():
-            self.elapsed_time_label.config(text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(0)}")
+            # Simply set the text without the "Time:" prefix
+            self.elapsed_time_label.config(text=self._format_seconds_to_dd_hh_mm_ss(0))
 
         command = self._build_command()
         threading.Thread(target=self._run_yt_dlp, args=(command,), daemon=True).start()
@@ -399,11 +482,11 @@ class DownloadItem:
                     elapsed = time.time() - self.start_time
                     if self.elapsed_time_label.winfo_exists() and self.elapsed_time_label.winfo_ismapped():
                         self.app_instance.master.after(0, lambda e=elapsed: self.elapsed_time_label.config(
-                            text=f"Time: {self._format_seconds_to_dd_hh_mm_ss(e)}"))
+                            text=self._format_seconds_to_dd_hh_mm_ss(e)))  # Removed "Time:" prefix
 
             rc = self.process.wait()
             if self.is_merging:
-                if self.progress_bar.winfo_exists():
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                     self.progress_bar.stop()
 
             if self.is_aborted:
@@ -412,7 +495,7 @@ class DownloadItem:
             elif rc == 0:
                 final_status = "completed"
                 self.update_status("completed", COLOR_STATUS_COMPLETE)
-                if self.progress_bar.winfo_exists():
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                     self.progress_bar.config(value=100, mode="determinate")
 
                 # --- Move final file from temp to downloads directory ---
@@ -485,32 +568,34 @@ class DownloadItem:
             if percent_str:
                 percent = float(percent_str)
                 if self.is_merging:
-                    if self.progress_bar.winfo_exists():
+                    if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                         self.progress_bar.stop()
                         self.progress_bar.config(mode="determinate")
                     self.is_merging = False
 
-                if self.progress_bar.winfo_exists():
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                     self.progress_bar.config(value=percent)
 
                 speed_match = re.search(r'at\s+([0-9\.]+[KMG]?iB/s|\S+)(?:\s+ETA\s+(\d{2}:\d{2}))?', line)
                 speed = speed_match.group(1) if speed_match and speed_match.group(1) else 'N/A'
                 eta = speed_match.group(2) if speed_match and speed_match.group(2) else 'N/A'
 
-                self.update_status(f"Downloading... {percent:.1f}% ({speed}, ETA {eta})", COLOR_STATUS_PROGRESS)
+                self.update_status(f"{percent:.1f}% ({speed}, ETA {eta})",
+                                   COLOR_STATUS_PROGRESS)  # Removed "Downloading..." prefix
             return
 
         if "merging formats" in line.lower() or "ffmpeg" in line.lower() or "postprocessing" in line.lower() or "extractaudio" in line.lower():
             if not self.is_merging:
                 self.update_status("Converting/Merging...", COLOR_STATUS_PROGRESS)
-                if self.progress_bar.winfo_exists():
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                     self.progress_bar.config(mode="indeterminate")
                     self.progress_bar.start()
                 self.is_merging = True
             return
 
         if "downloading" in line.lower() and not self.is_merging:
-            self.update_status("Downloading...", COLOR_STATUS_PROGRESS)
+            self.update_status("Downloading...",
+                               COLOR_STATUS_PROGRESS)  # Keep this for initial download phase before percentages
             return
 
     def update_status(self, text, color):
@@ -527,7 +612,7 @@ class DownloadItem:
                 self.process.kill()
                 self.update_status("aborted", COLOR_STATUS_ABORTED)
                 if self.is_merging:
-                    if self.progress_bar.winfo_exists():
+                    if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                         self.progress_bar.stop()
                         self.progress_bar.config(mode="determinate")
             except Exception:
@@ -588,6 +673,7 @@ class YTDLPGUIApp:
 
         self.master.after(100, self._process_queue_loop)
         self.on_source_change(YOUTUBE_SOURCE)
+        self.master.after_idle(self._refresh_display_order)  # Call _refresh_display_order after mainloop starts
 
         self.log_window = None
         self.log_text = None
@@ -795,8 +881,13 @@ class YTDLPGUIApp:
 
     def _on_downloads_canvas_resize(self, event):
         """Adjusts the width of the inner frame when the canvas resizes."""
+        # Update the width of the inner frame to match the canvas width
         self.downloads_canvas.itemconfig(self.downloads_canvas_window_id, width=event.width)
+        # Re-configure scroll region after width adjustment
         self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
+
+        # Re-call _refresh_display_order to update wraplengths
+        self._refresh_display_order()
 
     def _initialize_download_management(self):
         self.queued_downloads = []
@@ -982,7 +1073,7 @@ class YTDLPGUIApp:
         if video_only:
             menu.add_command(label="--- Video Only ---", state="disabled")
             for res, text in video_only:
-                add_command(f"{text} - {res}p")
+                add_command(f"{text}")
             menu.add_separator()
         if high_quality_video:
             menu.add_command(label="--- High Quality Video ---", state="disabled")
@@ -1102,46 +1193,98 @@ class YTDLPGUIApp:
         """
         Destroys and recreates all download item frames to ensure correct order
         and visibility (active vs. history).
+        Now includes a header row with clickable column headers for sorting.
         """
+        # Ensure the canvas and its inner frame have their correct sizes before calculating widths
+        self.downloads_canvas.update_idletasks()
+        self.downloads_frame_inner.update_idletasks()
+
         for widget in self.downloads_frame_inner.winfo_children():
             widget.destroy()
 
+        # --- Header Row ---
+        header_frame = tk.Frame(self.downloads_frame_inner, bg="#e0e0e0")
+        header_frame.pack(fill="x", padx=5, pady=(0, 2))
+        columns = [
+            ("Name", 0),
+            ("URL", 1),
+            ("Status", 2),  # Now Status/Progress combined
+            ("Date Added", 3),
+            ("Date Completed", 4),
+            ("Time / ETA", 5),
+            # Removed "Progress" header
+            ("Action", 6)  # Adjusted column index
+        ]
+        # Dynamically set column weights for the header frame to match the data rows
+        # These weights are crucial for alignment
+        header_frame.columnconfigure(0, weight=3)  # Name
+        header_frame.columnconfigure(1, weight=4)  # URL
+        header_frame.columnconfigure(2, weight=2)  # Status/Progress
+        header_frame.columnconfigure(3, weight=1)  # Date Added
+        header_frame.columnconfigure(4, weight=1)  # Date Completed
+        header_frame.columnconfigure(5, weight=1)  # Time/ETA
+        header_frame.columnconfigure(6, weight=1)  # Action
+
+        for col_name, col_idx in columns:
+            lbl = tk.Label(header_frame, text=col_name, font=BOLD_FONT, bg="#e0e0e0", borderwidth=1, relief="ridge")
+            lbl.grid(row=0, column=col_idx, sticky="ew", padx=1, pady=0)
+            lbl.bind("<Button-1>", lambda e, idx=col_idx: self._on_header_click(idx))
+
+        # --- Sorting ---
+        sort_col = getattr(self, '_current_sort_col', 3)  # Default: Date Added
+        sort_reverse = getattr(self, '_current_sort_reverse', True)
         all_display_items = list(self.download_items_map.values())
 
         def sort_key(item):
-            active_sort = 0 if item.is_active_item else 1
-            time_sort = 0
-
-            if item.is_active_item:
+            if sort_col == 0:  # Name
+                return (item.video_title or item.filename or "").lower()
+            elif sort_col == 1:  # URL
+                return (item.url or "").lower()
+            elif sort_col == 2:  # Status (can sort by status text)
+                return item.status.lower()
+            elif sort_col == 3:  # Date Added
                 try:
-                    # Convert "MM/DD/YY" to a comparable timestamp
-                    date_obj = time.strptime(item.date_added, "%m/%d/%y")
-                    time_sort = -time.mktime(date_obj)
-                except ValueError:
-                    time_sort = -time.time()
-            elif item.date_completed != 'N/A':
+                    return time.mktime(time.strptime(item.date_added, "%m/%d/%y"))
+                except Exception:
+                    return 0
+            elif sort_col == 4:  # Date Completed
                 try:
-                    # Convert "MM/DD/YY" to a comparable timestamp
-                    date_obj = time.strptime(item.date_completed, "%m/%d/%y")
-                    time_sort = -time.mktime(date_obj)
-                except ValueError:
-                    time_sort = -time.time()
-            else:
-                time_sort = -time.time()
+                    return time.mktime(time.strptime(item.date_completed, "%m/%d/%y"))
+                except Exception:
+                    return 0
+            elif sort_col == 5:  # Time/ETA (elapsed time)
+                return item.elapsed_time_seconds
+            # No sort for progress (column 6 in old setup) as it's now part of status
+            else:  # Default fallback sort
+                return 0
 
-            return (active_sort, time_sort)
-
-        all_display_items.sort(key=sort_key)
+        all_display_items.sort(key=sort_key, reverse=sort_reverse)
 
         for item_obj in all_display_items:
             item_obj.parent_frame = self.downloads_frame_inner
             item_obj._build_frame_widgets()
             item_obj.frame.pack(fill="x", padx=5, pady=3)
-            item_obj._update_title_label()
+            # IMPORTANT: Call _update_title_label here, but it needs to calculate
+            # widths based on the parent frame's *actual* rendered width.
+            # This is why we call update_idletasks on the canvas/inner_frame above.
+            item_obj._update_title_label()  # This will now set dynamic wraplengths and apply clipping
+            # Status update will now handle progress bar visibility and label text based on active/inactive
             item_obj.update_status(item_obj.status, item_obj._get_status_color(item_obj.status))
 
         self.downloads_frame_inner.update_idletasks()
         self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
+
+    def _on_header_click(self, col_idx):
+        """Handles sorting when a header is clicked."""
+        prev_col = getattr(self, '_current_sort_col', 3)
+        prev_rev = getattr(self, '_current_sort_reverse', True)
+        if prev_col == col_idx:
+            self._current_sort_reverse = not prev_rev
+        else:
+            self._current_sort_col = col_idx
+            # Default sorting order: Date Added/Completed newest first (True), others A-Z (False)
+            self._current_sort_reverse = True if col_idx in [3, 4] else False
+        self._refresh_display_order()
 
     def _get_item_data_for_history(self, item_obj):
         """Prepares a dictionary of item data for saving to history."""
@@ -1200,7 +1343,7 @@ class YTDLPGUIApp:
                         # Before creating DownloadItem, parse date_added and date_completed to ensure
                         # they are in the expected "MM/DD/YY" format for consistency, especially if loading
                         # from an older history file format.
-                        # Convert old "MM|DD|YYYY - H:MMpm" format to "MM/DD/YY"
+                        # Convert old "MM|DD|YYYY - H:MMpm" to "MM/DD/YY"
                         if item_data.get('date_added') and '|' in item_data['date_added']:
                             try:
                                 dt_obj = time.strptime(item_data['date_added'], "%m|%d|%Y - %I:%M%p")
