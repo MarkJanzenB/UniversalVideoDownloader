@@ -51,7 +51,7 @@ class DownloadItem:
 
         # Load data from item_data dictionary
         self.item_id = item_data.get('id')  # Unique ID for this item instance
-        self.url = item_data['url']
+        self.url = item_data['url'] # URL data is still needed for download process
         self.quality = item_data.get('quality', 'N/A')  # Quality might not be in history items
 
         # Ensure filename is always a string.
@@ -99,29 +99,25 @@ class DownloadItem:
             self.frame.destroy()
 
         self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=2, pady=2, bg="#f0f0f0")
-        # Columns: Name (0), URL (1), Status/Progress (2), Date Added (3), Date Completed (4), Time/ETA (5), Action (6)
-        # These weights should align with the header weights and the desired distribution.
-        self.frame.columnconfigure(0, weight=3)  # Name
-        self.frame.columnconfigure(1, weight=4)  # URL
-        self.frame.columnconfigure(2, weight=2)  # Status/Progress
-        self.frame.columnconfigure(3, weight=1)  # Date Added
-        self.frame.columnconfigure(4, weight=1)  # Date Completed
-        self.frame.columnconfigure(5, weight=1)  # Time/ETA
-        self.frame.columnconfigure(6, weight=1)  # Action
+        # Columns: Name (0), Status/Progress (1), Date Added (2), Date Completed (3), Time/ETA (4), Action (5)
+        # These weights align with the header weights for a strict table layout.
+        self.frame.columnconfigure(0, weight=4)  # Name
+        self.frame.columnconfigure(1, weight=2)  # Status/Progress
+        self.frame.columnconfigure(2, weight=1)  # Date Added
+        self.frame.columnconfigure(3, weight=1)  # Date Completed
+        self.frame.columnconfigure(4, weight=1)  # Time/ETA
+        self.frame.columnconfigure(5, weight=1)  # Action
 
         # Name (video title or filename)
         # wraplength will be set dynamically by _update_title_label
         self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", justify="left")
         self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
 
-        # URL (clipped/wrapped) - Removed "URL:" prefix
-        # wraplength will be set dynamically by _update_title_label
-        self.url_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0", justify="left")
-        self.url_label.grid(row=0, column=1, sticky="nw", padx=2, pady=0)
+        # Removed URL label and its grid placement
 
         # Status/Progress (combined column)
         self.status_progress_frame = tk.Frame(self.frame, bg="#f0f0f0")
-        self.status_progress_frame.grid(row=0, column=2, sticky="nsew", padx=2, pady=0)
+        self.status_progress_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=0) # Adjusted column to 1
         self.status_progress_frame.columnconfigure(0, weight=1)
 
         # Progress bar setup (common for both active/inactive to allow hiding/showing)
@@ -138,20 +134,20 @@ class DownloadItem:
             self.progress_bar.grid_forget()  # Hide progress bar for inactive items
             self.status_label.grid(row=0, column=0, sticky="ew")  # Show status label directly
 
-        # Date Added - Removed "Added:" prefix, adjusted width
+        # Date Added
         self.date_added_label = tk.Label(self.frame, text=self.date_added, font=SMALL_FONT, anchor="w", bg="#f0f0f0",
-                                         width=10)  # Reduced width slightly
-        self.date_added_label.grid(row=0, column=3, sticky="w", padx=2, pady=0)
+                                         width=10)
+        self.date_added_label.grid(row=0, column=2, sticky="w", padx=2, pady=0) # Adjusted column to 2
 
-        # Date Completed - Removed "Completed:" prefix, adjusted width
+        # Date Completed
         self.date_completed_label = tk.Label(self.frame, text=self.date_completed, font=SMALL_FONT, anchor="w",
-                                             bg="#f0f0f0", width=10)  # Reduced width slightly
-        self.date_completed_label.grid(row=0, column=4, sticky="w", padx=2, pady=0)
+                                             bg="#f0f0f0", width=10)
+        self.date_completed_label.grid(row=0, column=3, sticky="w", padx=2, pady=0) # Adjusted column to 3
 
-        # Time/ETA - Removed "Time:" prefix, adjusted width
+        # Time/ETA
         self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
-                                           width=8)  # Reduced width slightly
-        self.elapsed_time_label.grid(row=0, column=5, sticky="w", padx=2, pady=0)
+                                           width=8)
+        self.elapsed_time_label.grid(row=0, column=4, sticky="w", padx=2, pady=0) # Adjusted column to 4
 
         # Action buttons
         self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
@@ -161,14 +157,14 @@ class DownloadItem:
         self.retry_button = tk.Button(self.frame, text="Retry", command=self.retry_download, bg=COLOR_ADD_BUTTON,
                                       fg="white", font=SMALL_FONT, width=10)
 
-        # Action button placement in the last column (column 6)
+        # Action button placement in the last column (column 5)
         if self.is_active_item:
-            self.abort_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)
+            self.abort_button.grid(row=0, column=5, sticky="e", padx=2, pady=0) # Adjusted column to 5
         else:
             if self.status in ['failed', 'aborted', 'cancelled']:
-                self.retry_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)
+                self.retry_button.grid(row=0, column=5, sticky="e", padx=2, pady=0) # Adjusted column to 5
             elif self.status == 'completed':
-                self.open_file_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)
+                self.open_file_button.grid(row=0, column=5, sticky="e", padx=2, pady=0) # Adjusted column to 5
 
         # Ensure correct visibility of progress bar/status label based on item state
         self._update_progress_visibility()
@@ -288,7 +284,7 @@ class DownloadItem:
 
     def _update_title_label(self):
         """
-        Updates the title and URL labels on the UI with fetched info,
+        Updates the title label on the UI with fetched info,
         and sets wraplength dynamically based on column width,
         with explicit clipping if still too long.
         """
@@ -301,25 +297,21 @@ class DownloadItem:
         if total_frame_width == 0:  # Fallback if not yet rendered
             total_frame_width = 900  # A reasonable guess based on the 1000px main window minus padding
 
-        # Define the relative widths based on column weights (3:4:2:1:1:1:1 for 7 columns)
-        # Sum of weights: 3+4+2+1+1+1+1 = 13
-        name_col_ratio = 3 / 13
-        url_col_ratio = 4 / 13
+        # Define the relative widths based on column weights (4:2:1:1:1:1 for 6 columns)
+        # Sum of weights: 4+2+1+1+1+1 = 10
+        name_col_ratio = 4 / 10
 
         # More aggressive safety margin to ensure text doesn't overflow
         # This accounts for internal padding, borders, and ellipsis
         safety_margin_px = 30
 
         name_column_pixel_width = int(total_frame_width * name_col_ratio) - safety_margin_px
-        url_column_pixel_width = int(total_frame_width * url_col_ratio) - safety_margin_px
 
         # Ensure minimum width to prevent negative wraplength
         name_column_pixel_width = max(10, name_column_pixel_width)
-        url_column_pixel_width = max(10, url_column_pixel_width)
 
         # Set wraplength for labels - this primarily handles word wrapping
         self.title_label.config(wraplength=name_column_pixel_width)
-        self.url_label.config(wraplength=url_column_pixel_width)
 
         # --- Update and Truncate Title Label ---
         # Prioritize error status if it's an error status
@@ -327,7 +319,7 @@ class DownloadItem:
             display_name_raw = f"{self.status.capitalize()}: {self.video_title}"
         else:
             display_name_raw = self.video_title if self.video_title and self.video_title != 'Fetching Title...' else (
-                os.path.basename(self.filename) if self.filename else self.url)
+                os.path.basename(self.filename) if self.filename else f"VideoPlayback_{self.item_id}") # Fallback if no title/filename
 
         # Add source in parentheses
         display_name_full = f"{display_name_raw} ({self.source})"
@@ -354,35 +346,7 @@ class DownloadItem:
         if self.title_label.winfo_exists():
             self.title_label.config(text=display_name_final)
 
-        # --- Update and Truncate URL Label ---
-        if self.is_active_item:
-            # For active items, URL column might be less critical or used differently
-            # We can choose to show less of the URL or omit it entirely if needed.
-            # For now, let's just make it empty for active items to prioritize status/progress.
-            display_url_final = ""
-        else:
-            display_url_raw = self.url
-            font_url_obj = tkinter.font.Font(family=SMALL_FONT[0], size=SMALL_FONT[1])
-
-            url_text_width_px = font_url_obj.measure(display_url_raw)
-
-            if url_text_width_px > url_column_pixel_width:
-                truncated_url = ""
-                for i in range(len(display_url_raw)):
-                    test_url = display_url_raw[:i + 1] + "..."
-                    if font_url_obj.measure(test_url) > url_column_pixel_width:
-                        truncated_url = display_url_raw[:i] + "..."
-                        break
-                if not truncated_url:
-                    truncated_url = display_url_raw
-                display_url_final = truncated_url
-            else:
-                display_url_final = display_url_raw
-
-        # No need to destroy font objects, they are automatically managed when out of scope.
-
-        if self.url_label.winfo_exists():
-            self.url_label.config(text=display_url_final)
+        # Removed URL label update logic entirely
 
         # Update other labels (Date Added, Date Completed, Elapsed Time)
         if self.date_added_label.winfo_exists():
@@ -1207,23 +1171,20 @@ class YTDLPGUIApp:
         header_frame.pack(fill="x", padx=5, pady=(0, 2))
         columns = [
             ("Name", 0),
-            ("URL", 1),
-            ("Status", 2),  # Now Status/Progress combined
-            ("Date Added", 3),
-            ("Date Completed", 4),
-            ("Time / ETA", 5),
-            # Removed "Progress" header
-            ("Action", 6)  # Adjusted column index
+            ("Status", 1),  # Adjusted column index
+            ("Date Added", 2), # Adjusted column index
+            ("Date Completed", 3), # Adjusted column index
+            ("Time / ETA", 4), # Adjusted column index
+            ("Action", 5)  # Adjusted column index
         ]
         # Dynamically set column weights for the header frame to match the data rows
         # These weights are crucial for alignment
-        header_frame.columnconfigure(0, weight=3)  # Name
-        header_frame.columnconfigure(1, weight=4)  # URL
-        header_frame.columnconfigure(2, weight=2)  # Status/Progress
-        header_frame.columnconfigure(3, weight=1)  # Date Added
-        header_frame.columnconfigure(4, weight=1)  # Date Completed
-        header_frame.columnconfigure(5, weight=1)  # Time/ETA
-        header_frame.columnconfigure(6, weight=1)  # Action
+        header_frame.columnconfigure(0, weight=4)  # Name
+        header_frame.columnconfigure(1, weight=2)  # Status/Progress
+        header_frame.columnconfigure(2, weight=1)  # Date Added
+        header_frame.columnconfigure(3, weight=1)  # Date Completed
+        header_frame.columnconfigure(4, weight=1)  # Time/ETA
+        header_frame.columnconfigure(5, weight=1)  # Action
 
         for col_name, col_idx in columns:
             lbl = tk.Label(header_frame, text=col_name, font=BOLD_FONT, bg="#e0e0e0", borderwidth=1, relief="ridge")
@@ -1231,31 +1192,31 @@ class YTDLPGUIApp:
             lbl.bind("<Button-1>", lambda e, idx=col_idx: self._on_header_click(idx))
 
         # --- Sorting ---
-        sort_col = getattr(self, '_current_sort_col', 3)  # Default: Date Added
+        # Default sort_col values adjusted for new column indices.
+        # Default: Date Added (now index 2) newest first (True)
+        sort_col = getattr(self, '_current_sort_col', 2)
         sort_reverse = getattr(self, '_current_sort_reverse', True)
         all_display_items = list(self.download_items_map.values())
 
         def sort_key(item):
+            # Sorting logic adjusted for new column indices
             if sort_col == 0:  # Name
                 return (item.video_title or item.filename or "").lower()
-            elif sort_col == 1:  # URL
-                return (item.url or "").lower()
-            elif sort_col == 2:  # Status (can sort by status text)
+            elif sort_col == 1:  # Status (can sort by status text)
                 return item.status.lower()
-            elif sort_col == 3:  # Date Added
+            elif sort_col == 2:  # Date Added
                 try:
                     return time.mktime(time.strptime(item.date_added, "%m/%d/%y"))
                 except Exception:
                     return 0
-            elif sort_col == 4:  # Date Completed
+            elif sort_col == 3:  # Date Completed
                 try:
                     return time.mktime(time.strptime(item.date_completed, "%m/%d/%y"))
                 except Exception:
                     return 0
-            elif sort_col == 5:  # Time/ETA (elapsed time)
+            elif sort_col == 4:  # Time/ETA (elapsed time)
                 return item.elapsed_time_seconds
-            # No sort for progress (column 6 in old setup) as it's now part of status
-            else:  # Default fallback sort
+            else:  # Default fallback sort for Action or invalid
                 return 0
 
         all_display_items.sort(key=sort_key, reverse=sort_reverse)
@@ -1276,14 +1237,14 @@ class YTDLPGUIApp:
 
     def _on_header_click(self, col_idx):
         """Handles sorting when a header is clicked."""
-        prev_col = getattr(self, '_current_sort_col', 3)
+        prev_col = getattr(self, '_current_sort_col', 2) # Default to Date Added (new index 2)
         prev_rev = getattr(self, '_current_sort_reverse', True)
         if prev_col == col_idx:
             self._current_sort_reverse = not prev_rev
         else:
             self._current_sort_col = col_idx
             # Default sorting order: Date Added/Completed newest first (True), others A-Z (False)
-            self._current_sort_reverse = True if col_idx in [3, 4] else False
+            self._current_sort_reverse = True if col_idx in [2, 3] else False # Adjusted indices for Date Added/Completed
         self._refresh_display_order()
 
     def _get_item_data_for_history(self, item_obj):
@@ -1397,4 +1358,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
