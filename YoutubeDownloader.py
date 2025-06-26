@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, END, ttk
+from tkinter import scrolledtext, messagebox, END, ttk, filedialog
 import subprocess
 import sys
 import os
@@ -8,23 +8,25 @@ import queue
 import shutil
 import time
 import re
-import json  # For parsing local history JSON
-import tkinter.font  # Import the font module
+import json
+import tkinter.font
 
 # --- Constants for consistent naming and values --
 DOWNLOADS_DIR = "downloads"
 TEMP_SUBDIR = "temp"
 YOUTUBE_SOURCE = "YouTube"
 XTREAM_SOURCE = "XtremeStream"
+LOCAL_SOURCE = "Local" # New constant for local video conversion
 MAX_CONCURRENT_DOWNLOADS = 2
-HISTORY_FILE = "download_history.json"  # Local history file
+HISTORY_FILE = "download_history.json"
 
-# Colors for buttons/status (Tailwind-like or common vibrant colors)
+# Colors for buttons/status
 COLOR_ADD_BUTTON = "#28A745"  # Green
 COLOR_ABORT_BUTTON = "#DC3545"  # Red
 COLOR_CLEAR_BUTTON = "#FFC107"  # Yellow-Orange
-COLOR_OPEN_FOLDER_BUTTON = "#6C757D"  # Grey/Dark grey
+COLOR_OPEN_FOLDER_BUTTON = "#6C754C"  # Dark Grey/Greenish Grey
 COLOR_OPEN_FILE_BUTTON = "#17A2B8"  # Info Blue/Cyan
+COLOR_BROWSE_FILE_BUTTON = "#007BFF" # Blue for browse
 
 COLOR_STATUS_READY = "black"
 COLOR_STATUS_PROGRESS = "#007BFF"  # Blue
@@ -41,21 +43,19 @@ MONO_FONT = ("Roboto Mono", 9)
 
 class DownloadItem:
     """
-    Manages the UI and logic for a single download.
-    Can represent an active/queued download or a finished history item.
+    Manages the UI and logic for a single download/conversion.
+    Can represent an active/queued item or a finished history item.
     """
 
     def __init__(self, app_instance, item_data, is_active_item=True):
-        self.parent_frame = None  # Will be set dynamically during _refresh_display_order
+        self.parent_frame = None
         self.app_instance = app_instance
 
-        # Load data from item_data dictionary
-        self.item_id = item_data.get('id')  # Unique ID for this item instance
-        self.url = item_data['url'] # URL data is still needed for download process
-        self.quality = item_data.get('quality', 'N/A')  # Quality might not be in history items
+        self.item_id = item_data.get('id')
+        # Handle backward compatibility: check for 'source_path', otherwise use 'url'
+        self.source_path = item_data.get('source_path', item_data.get('url')) # Fallback from 'url'
+        self.quality = item_data.get('quality', 'N/A')
 
-        # Ensure filename is always a string.
-        # Get the raw value, then explicitly convert to string if not None, otherwise default to empty string.
         raw_filename = item_data.get('filename')
         self.filename = str(raw_filename) if raw_filename is not None else ''
 
@@ -69,28 +69,34 @@ class DownloadItem:
         self.filename_provided_by_user = item_data.get('filename_provided_by_user', False)
         self.elapsed_time_seconds = item_data.get('elapsed_time_seconds', 0)
 
-        # Flag to indicate if the video title has been successfully fetched
-        self.is_title_fetched = self.filename_provided_by_user or (self.video_title != 'Fetching Title...')
+        # New flag: Is this a local video conversion?
+        self.is_local_conversion = (self.source == LOCAL_SOURCE)
 
-        # New flag: Is this item ready to be downloaded? (i.e., title fetched if needed)
-        # If it's a history item or filename was user-provided, it's ready.
-        # If it's a new active item that needs title fetching, it's not ready yet.
-        self.ready_for_download = not (
-                    is_active_item and not self.filename_provided_by_user and not self.is_title_fetched)
+        # If it's a local conversion, the title is simply the filename, and it's immediately ready
+        if self.is_local_conversion:
+            self.video_title = os.path.basename(self.source_path)
+            self.filename = os.path.splitext(os.path.basename(self.source_path))[0] # Set filename to base name without extension
+            self.is_title_fetched = True
+            self.ready_for_download = True
+            self.expected_final_ext = ".mp4" # Local conversions are always MP4 as per request
+        else:
+            self.is_title_fetched = self.filename_provided_by_user or (self.video_title != 'Fetching Title...')
+            self.ready_for_download = not (is_active_item and not self.filename_provided_by_user and not self.is_title_fetched)
+            self.expected_final_ext = ".mp3" if self.mp3_conversion else ".mp4"
+
 
         self.process = None
         self.output_queue = queue.Queue()
         self.start_time = None
         self.last_update_time = None
         self.is_aborted = False
-        self.is_merging = False
-        self.is_active_item = is_active_item  # This flag determines active/history layout, not if it's currently running
+        self.is_merging = False # Used for yt-dlp's merging phase
+        self.is_active_item = is_active_item
 
         self.frame = None
-        self.retry_button = None  # Initialize retry button attribute
+        self.retry_button = None
 
-        # For new active items, if filename isn't provided, fetch the title asynchronously
-        if self.is_active_item and not self.filename_provided_by_user and not self.is_title_fetched:
+        if self.is_active_item and not self.filename_provided_by_user and not self.is_title_fetched and not self.is_local_conversion:
             self.fetch_title_async()
 
     def _build_frame_widgets(self):
@@ -99,8 +105,6 @@ class DownloadItem:
             self.frame.destroy()
 
         self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=2, pady=2, bg="#f0f0f0")
-        # Columns: Name (0), Status/Progress (1), Date Added (2), Date Completed (3), Time/ETA (4), Action (5)
-        # These weights align with the header weights for a strict table layout.
         self.frame.columnconfigure(0, weight=4)  # Name
         self.frame.columnconfigure(1, weight=2)  # Status/Progress
         self.frame.columnconfigure(2, weight=1)  # Date Added
@@ -108,48 +112,37 @@ class DownloadItem:
         self.frame.columnconfigure(4, weight=1)  # Time/ETA
         self.frame.columnconfigure(5, weight=1)  # Action
 
-        # Name (video title or filename)
-        # wraplength will be set dynamically by _update_title_label
         self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", justify="left")
         self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
 
-        # Removed URL label and its grid placement
-
-        # Status/Progress (combined column)
         self.status_progress_frame = tk.Frame(self.frame, bg="#f0f0f0")
-        self.status_progress_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=0) # Adjusted column to 1
+        self.status_progress_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=0)
         self.status_progress_frame.columnconfigure(0, weight=1)
 
-        # Progress bar setup (common for both active/inactive to allow hiding/showing)
         self.progress_bar = ttk.Progressbar(self.status_progress_frame, orient="horizontal", mode="determinate",
                                             length=120)
-        # Status label, initial setup
         self.status_label = tk.Label(self.status_progress_frame, text="", font=SMALL_FONT, anchor="center",
                                      fg=self._get_status_color(self.status), bg="#f0f0f0", width=14)
 
         if self.is_active_item:
             self.progress_bar.grid(row=0, column=0, sticky="ew")
-            self.status_label.place(relx=0.5, rely=0.5, anchor="center")  # Overlay
+            self.status_label.place(relx=0.5, rely=0.5, anchor="center")
         else:
-            self.progress_bar.grid_forget()  # Hide progress bar for inactive items
-            self.status_label.grid(row=0, column=0, sticky="ew")  # Show status label directly
+            self.progress_bar.grid_forget()
+            self.status_label.grid(row=0, column=0, sticky="ew")
 
-        # Date Added
         self.date_added_label = tk.Label(self.frame, text=self.date_added, font=SMALL_FONT, anchor="w", bg="#f0f0f0",
                                          width=10)
-        self.date_added_label.grid(row=0, column=2, sticky="w", padx=2, pady=0) # Adjusted column to 2
+        self.date_added_label.grid(row=0, column=2, sticky="w", padx=2, pady=0)
 
-        # Date Completed
         self.date_completed_label = tk.Label(self.frame, text=self.date_completed, font=SMALL_FONT, anchor="w",
                                              bg="#f0f0f0", width=10)
-        self.date_completed_label.grid(row=0, column=3, sticky="w", padx=2, pady=0) # Adjusted column to 3
+        self.date_completed_label.grid(row=0, column=3, sticky="w", padx=2, pady=0)
 
-        # Time/ETA
         self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
                                            width=8)
-        self.elapsed_time_label.grid(row=0, column=4, sticky="w", padx=2, pady=0) # Adjusted column to 4
+        self.elapsed_time_label.grid(row=0, column=4, sticky="w", padx=2, pady=0)
 
-        # Action buttons
         self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
                                       fg="white", font=SMALL_FONT, width=8)
         self.open_file_button = tk.Button(self.frame, text="Open File", command=self._open_file_location,
@@ -157,35 +150,31 @@ class DownloadItem:
         self.retry_button = tk.Button(self.frame, text="Retry", command=self.retry_download, bg=COLOR_ADD_BUTTON,
                                       fg="white", font=SMALL_FONT, width=10)
 
-        # Action button placement in the last column (column 5)
         if self.is_active_item:
-            self.abort_button.grid(row=0, column=5, sticky="e", padx=2, pady=0) # Adjusted column to 5
+            self.abort_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
         else:
             if self.status in ['failed', 'aborted', 'cancelled']:
-                self.retry_button.grid(row=0, column=5, sticky="e", padx=2, pady=0) # Adjusted column to 5
+                self.retry_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
             elif self.status == 'completed':
-                self.open_file_button.grid(row=0, column=5, sticky="e", padx=2, pady=0) # Adjusted column to 5
+                self.open_file_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
 
-        # Ensure correct visibility of progress bar/status label based on item state
         self._update_progress_visibility()
 
     def _update_progress_visibility(self):
         """Manages the visibility of the progress bar and status label based on item state."""
         if self.is_active_item:
             if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                self.progress_bar.lift()  # Ensure progress bar is on top
+                self.progress_bar.lift()
             if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-                # Place over progress bar if active
                 self.status_label.place(relx=0.5, rely=0.5, anchor="center")
-                # Make background transparent to show progress bar
-                self.status_label.config(bg="#f0f0f0")  # Match parent frame background
+                self.status_label.config(bg="#f0f0f0")
         else:
             if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                self.progress_bar.grid_forget()  # Hide progress bar
+                self.progress_bar.grid_forget()
             if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-                self.status_label.place_forget()  # Remove place geometry manager
-                self.status_label.grid(row=0, column=0, sticky="ew")  # Use grid for non-overlay
-                self.status_label.config(bg="#f0f0f0")  # Ensure consistent background
+                self.status_label.place_forget()
+                self.status_label.grid(row=0, column=0, sticky="ew")
+                self.status_label.config(bg="#f0f0f0")
 
     def _get_status_color(self, status_text):
         """Returns the color based on status text."""
@@ -216,7 +205,13 @@ class DownloadItem:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def fetch_title_async(self):
-        """Fetches the video title asynchronously and updates the label."""
+        """Fetches the video title asynchronously and updates the label. Only for YouTube/XtremeStream."""
+        if self.is_local_conversion:
+            # No title fetching needed for local files, it's just the filename
+            self.is_title_fetched = True
+            self.ready_for_download = True
+            self.app_instance.master.after(0, self.app_instance._refresh_display_order)
+            return
 
         def _fetch():
             try:
@@ -224,7 +219,7 @@ class DownloadItem:
                     self.app_instance.yt_dlp_path,
                     "--print-json",
                     "--skip-download",
-                    self.url
+                    self.source_path
                 ]
                 if self.source == XTREAM_SOURCE and self.referer:
                     command += ["--add-header", f"referer: {self.referer}"]
@@ -240,7 +235,7 @@ class DownloadItem:
                     self.filename = sanitized_title if sanitized_title else f"VideoPlayback_{self.item_id}"
 
                 self.is_title_fetched = True
-                self.ready_for_download = True  # Mark as ready after title fetch
+                self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
 
             except FileNotFoundError:
@@ -248,37 +243,37 @@ class DownloadItem:
                 if not self.filename_provided_by_user:
                     self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
-                self.ready_for_download = True  # Still mark as ready, with fallback filename
+                self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
-                print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for URL: {self.url}")
+                print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for URL: {self.source_path}")
             except subprocess.CalledProcessError as e:
                 self.video_title = f"Error fetching title: Command failed. {e.stderr.strip()}"
                 if not self.filename_provided_by_user:
                     self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
-                self.ready_for_download = True  # Still mark as ready, with fallback filename
+                self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
-                print(f"subprocess.CalledProcessError for URL {self.url}: {e.stderr.strip()}")
+                print(f"subprocess.CalledProcessError for URL {self.source_path}: {e.stderr.strip()}")
             except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
                 self.video_title = f"Error fetching title: {e}"
                 if not self.filename_provided_by_user:
                     self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
-                self.ready_for_download = True  # Still mark as ready, with fallback filename
+                self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
-                print(f"Decoding/Timeout Error for URL {self.url}: {e}")
+                print(f"Decoding/Timeout Error for URL {self.source_path}: {e}")
             except Exception as e:
                 self.video_title = f"Unexpected error fetching title: {e}"
                 if not self.filename_provided_by_user:
                     self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
-                self.ready_for_download = True  # Still mark as ready, with fallback filename
+                self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
                 self.app_instance.master.after(0, lambda: self.update_status("Error", COLOR_STATUS_FAILED))
-                print(f"General Error fetching title for URL {self.url}: {e}")
+                print(f"General Error fetching title for URL {self.source_path}: {e}")
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -288,46 +283,31 @@ class DownloadItem:
         and sets wraplength dynamically based on column width,
         with explicit clipping if still too long.
         """
-        # Ensure the frame has been mapped and laid out before trying to get its dimensions.
         self.frame.update_idletasks()
 
-        # Get the total width of the inner downloads frame (which is the canvas width)
-        # This gives us the total available width for all columns.
         total_frame_width = self.app_instance.downloads_canvas.winfo_width()
-        if total_frame_width == 0:  # Fallback if not yet rendered
-            total_frame_width = 900  # A reasonable guess based on the 1000px main window minus padding
+        if total_frame_width == 0:
+            total_frame_width = 900
 
-        # Define the relative widths based on column weights (4:2:1:1:1:1 for 6 columns)
-        # Sum of weights: 4+2+1+1+1+1 = 10
         name_col_ratio = 4 / 10
-
-        # More aggressive safety margin to ensure text doesn't overflow
-        # This accounts for internal padding, borders, and ellipsis
         safety_margin_px = 30
-
         name_column_pixel_width = int(total_frame_width * name_col_ratio) - safety_margin_px
-
-        # Ensure minimum width to prevent negative wraplength
         name_column_pixel_width = max(10, name_column_pixel_width)
 
-        # Set wraplength for labels - this primarily handles word wrapping
         self.title_label.config(wraplength=name_column_pixel_width)
 
-        # --- Update and Truncate Title Label ---
-        # Prioritize error status if it's an error status
         if "Error" in self.video_title or self.status in ['failed', 'aborted', 'cancelled']:
             display_name_raw = f"{self.status.capitalize()}: {self.video_title}"
+        elif self.is_local_conversion:
+            # For local, video_title is already basename; use it directly
+            display_name_raw = self.video_title
         else:
             display_name_raw = self.video_title if self.video_title and self.video_title != 'Fetching Title...' else (
-                os.path.basename(self.filename) if self.filename else f"VideoPlayback_{self.item_id}") # Fallback if no title/filename
+                os.path.basename(self.filename) if self.filename else f"VideoPlayback_{self.item_id}")
 
-        # Add source in parentheses
         display_name_full = f"{display_name_raw} ({self.source})"
 
-        # Manual truncation with ellipsis for single-line fit (even after wraplength)
-        # Create a Font object for accurate measurement
         font_obj = tkinter.font.Font(family=MAIN_FONT[0], size=MAIN_FONT[1])
-
         text_width_px = font_obj.measure(display_name_full)
 
         if text_width_px > name_column_pixel_width:
@@ -335,9 +315,9 @@ class DownloadItem:
             for i in range(len(display_name_full)):
                 test_text = display_name_full[:i + 1] + "..."
                 if font_obj.measure(test_text) > name_column_pixel_width:
-                    truncated_text = display_name_full[:i] + "..."  # Go back one char if it overflows
+                    truncated_text = display_name_full[:i] + "..."
                     break
-            if not truncated_text:  # If loop completes without breaking (meaning it fits perfectly)
+            if not truncated_text:
                 truncated_text = display_name_full
             display_name_final = truncated_text
         else:
@@ -346,9 +326,6 @@ class DownloadItem:
         if self.title_label.winfo_exists():
             self.title_label.config(text=display_name_final)
 
-        # Removed URL label update logic entirely
-
-        # Update other labels (Date Added, Date Completed, Elapsed Time)
         if self.date_added_label.winfo_exists():
             self.date_added_label.config(text=self.date_added)
         if self.date_completed_label.winfo_exists():
@@ -358,7 +335,7 @@ class DownloadItem:
                 text=self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds))
 
     def start_download(self):
-        """Starts the yt-dlp process for this item in a new thread."""
+        """Starts the yt-dlp or ffmpeg process for this item in a new thread."""
         self.is_aborted = False
         self.is_merging = False
         self.start_time = time.time()
@@ -367,66 +344,92 @@ class DownloadItem:
         self.is_active_item = True
         self.app_instance._refresh_display_order()
 
-        # Check if progress_bar and status_label exist before configuring
         if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
             self.progress_bar.config(value=0, mode="determinate")
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-            self.status_label.config(bg="#f0f0f0")  # Ensure transparent background when active
+            self.status_label.config(bg="#f0f0f0")
 
         if self.abort_button.winfo_exists():
             self.abort_button.config(state="normal")
         if self.elapsed_time_label.winfo_exists():
-            # Simply set the text without the "Time:" prefix
             self.elapsed_time_label.config(text=self._format_seconds_to_dd_hh_mm_ss(0))
 
         command = self._build_command()
-        threading.Thread(target=self._run_yt_dlp, args=(command,), daemon=True).start()
+        # Determine if it's an ffmpeg process based on source type
+        is_ffmpeg_process = (self.source == LOCAL_SOURCE)
+        threading.Thread(target=self._run_conversion_process, args=(command, is_ffmpeg_process,), daemon=True).start()
 
     def _build_command(self):
-        """Builds the yt-dlp command for this specific download item."""
-        command = [self.app_instance.yt_dlp_path, self.url]
-
-        if self.source == XTREAM_SOURCE and self.referer:
-            command += ["--add-header", f"referer: {self.referer}"]
-
+        """Builds the yt-dlp or ffmpeg command for this specific item."""
         downloads_dir = os.path.join(os.getcwd(), DOWNLOADS_DIR)
         temp_dir = os.path.join(downloads_dir, TEMP_SUBDIR, str(self.item_id))
         os.makedirs(temp_dir, exist_ok=True)
-
-        # All yt-dlp output will initially go into the temporary directory
-        # The final file will be moved to the main downloads directory after completion
         out_name = self.filename
-        if self.mp3_conversion:
-            # Explicitly output as .mp3 inside the temp directory
-            command += ["--extract-audio", "--audio-format", "mp3", "--output",
-                        os.path.join(temp_dir, out_name + ".mp3")]
-            self.expected_final_ext = ".mp3"
-        else:
-            # Explicitly output as .mp4 inside the temp directory
-            command += ["--recode-video", "mp4", "--output", os.path.join(temp_dir, out_name + ".mp4")]
+
+        if self.is_local_conversion:
+            command = ["ffmpeg", "-i", self.source_path] # Input local file
+            if self.quality == "Same as source":
+                # Attempt to copy video/audio streams if compatible, otherwise re-encode with very high quality
+                command += ["-c:v", "copy", "-c:a", "copy", "-map", "0", "-y", os.path.join(temp_dir, out_name + ".mp4")]
+                # Note: 'copy' might fail if codecs are not natively supported by MP4 container.
+                # A more robust "same as source" would involve probing the source for codec and
+                # only using '-c:v copy -c:a copy' if compatible, otherwise re-encoding with a lossless/high-quality preset.
+                # For simplicity here, we assume direct copy if possible. If copy fails, FFmpeg might
+                # silently re-encode or throw an error depending on version/config.
+            else:
+                crf_value = 23 # Default medium quality
+                if self.quality == "High Quality MP4":
+                    crf_value = 18 # Lower CRF = higher quality (visually lossless for most)
+                elif self.quality == "Low Quality MP4":
+                    crf_value = 28 # Higher CRF = lower quality
+
+                command += [
+                    "-preset", "medium", # Conversion speed vs. compression efficiency
+                    "-crf", str(crf_value), # Constant Rate Factor for video quality
+                    "-c:v", "libx264", # Video codec
+                    "-c:a", "aac", # Audio codec
+                    "-b:a", "128k", # Audio bitrate
+                    "-y", # Overwrite output files without asking
+                    os.path.join(temp_dir, out_name + ".mp4") # Output to temp dir
+                ]
             self.expected_final_ext = ".mp4"
+            print(f"FFmpeg Command: {' '.join(command)}")
+        else:
+            # yt-dlp command for YouTube/XtremeStream
+            command = [self.app_instance.yt_dlp_path, self.source_path]
 
-        if self.source == YOUTUBE_SOURCE:
-            if "Auto (Best available)" in self.quality:
-                command += ['-f', 'bestvideo+bestaudio/best']
-            elif self.quality == "High Quality - 1080p":
-                command += ['-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]']
-            elif self.quality == "Medium Quality - 720p":
-                command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
-            elif "Combined" in self.quality:
-                res = re.search(r'(\d+)p', self.quality).group(1)
-                command += ['-f', f'bestvideo[height<={res}]+bestaudio/best[height<={res}]']
-            elif "Video Only" in self.quality:
-                res = re.search(r'(\d+)p', self.quality).group(1)
-                command += ['-f', f'bestvideo[height<={res}]']
+            if self.source == XTREAM_SOURCE and self.referer:
+                command += ["--add-header", f"referer: {self.referer}"]
 
-        # Add the temporary download path for yt-dlp's internal temp handling
-        command += ["--paths", f"temp:{temp_dir}"]
-        command += ["--newline"]
+            if self.mp3_conversion:
+                command += ["--extract-audio", "--audio-format", "mp3", "--output",
+                            os.path.join(temp_dir, out_name + ".mp3")]
+                self.expected_final_ext = ".mp3"
+            else:
+                command += ["--recode-video", "mp4", "--output", os.path.join(temp_dir, out_name + ".mp4")]
+                self.expected_final_ext = ".mp4"
+
+            if self.source == YOUTUBE_SOURCE:
+                if "Auto (Best available)" in self.quality:
+                    command += ['-f', 'bestvideo+bestaudio/best']
+                elif self.quality == "High Quality - 1080p":
+                    command += ['-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]']
+                elif self.quality == "Medium Quality - 720p":
+                    command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<={res}]']
+                elif "Combined" in self.quality:
+                    res = re.search(r'(\d+)p', self.quality).group(1)
+                    command += ['-f', f'bestvideo[height<={res}]+bestaudio/best[height<={res}]']
+                elif "Video Only" in self.quality:
+                    res = re.search(r'(\d+)p', self.quality).group(1)
+                    command += ['-f', f'bestvideo[height<={res}]']
+
+            command += ["--paths", f"temp:{temp_dir}"]
+            command += ["--newline"]
+            print(f"Yt-dlp Command: {' '.join(command)}")
         return command
 
-    def _run_yt_dlp(self, command):
-        """Runs the yt-dlp subprocess and captures its output."""
+    def _run_conversion_process(self, command, is_ffmpeg_process):
+        """Runs the subprocess (yt-dlp or ffmpeg) and captures its output."""
         rc = -1
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
@@ -441,12 +444,16 @@ class DownloadItem:
                 if self.app_instance.log_window_visible and self.app_instance.log_text:
                     self.app_instance.master.after(0, lambda l=line: self._append_to_log(l))
 
-                self._parse_output_for_progress(line)
+                if is_ffmpeg_process:
+                    self._parse_ffmpeg_output_for_progress(line)
+                else:
+                    self._parse_output_for_progress(line) # For yt-dlp
+
                 if self.start_time:
                     elapsed = time.time() - self.start_time
                     if self.elapsed_time_label.winfo_exists() and self.elapsed_time_label.winfo_ismapped():
                         self.app_instance.master.after(0, lambda e=elapsed: self.elapsed_time_label.config(
-                            text=self._format_seconds_to_dd_hh_mm_ss(e)))  # Removed "Time:" prefix
+                            text=self._format_seconds_to_dd_hh_mm_ss(e)))
 
             rc = self.process.wait()
             if self.is_merging:
@@ -462,30 +469,27 @@ class DownloadItem:
                 if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                     self.progress_bar.config(value=100, mode="determinate")
 
-                # --- Move final file from temp to downloads directory ---
                 temp_dir = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(self.item_id))
                 final_file_in_temp = os.path.join(temp_dir, self.filename + self.expected_final_ext)
                 final_destination = os.path.join(os.getcwd(), DOWNLOADS_DIR, self.filename + self.expected_final_ext)
 
                 if os.path.exists(final_file_in_temp):
                     try:
-                        # Ensure the main downloads directory exists
                         os.makedirs(os.path.join(os.getcwd(), DOWNLOADS_DIR), exist_ok=True)
                         shutil.move(final_file_in_temp, final_destination)
                         print(f"Moved final file from '{final_file_in_temp}' to '{final_destination}'")
                     except Exception as move_error:
                         print(f"Error moving final file: {move_error}")
-                        # If move fails, still mark as completed, but warn user
                         self.app_instance.master.after(0, lambda: messagebox.showwarning(
                             "File Move Warning",
-                            f"Download completed but could not move final file to downloads folder:\n{move_error}\n"
+                            f"Conversion completed but could not move final file to downloads folder:\n{move_error}\n"
                             f"File might be in temporary folder: {final_file_in_temp}"
                         ))
                 else:
                     print(f"Final file not found in temp directory: {final_file_in_temp}")
                     self.app_instance.master.after(0, lambda: messagebox.showwarning(
                         "File Not Found",
-                        f"Final downloaded file was not found where expected after conversion in temp folder: {final_file_in_temp}"
+                        f"Final converted file was not found where expected in temp folder: {final_file_in_temp}"
                     ))
 
             else:
@@ -495,23 +499,24 @@ class DownloadItem:
         except FileNotFoundError:
             final_status = "failed"
             self.update_status("failed", COLOR_STATUS_FAILED)
+            tool_name = "ffmpeg.exe" if is_ffmpeg_process else "yt-dlp.exe"
             if self.app_instance.log_window_visible and self.app_instance.log_text:
                 self.app_instance.master.after(0, lambda: self._append_to_log(
-                    "ERROR: yt-dlp.exe not found or not in PATH.\n"))
-            print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for URL: {self.url}")
+                    f"ERROR: {tool_name} not found or not in PATH.\n"))
+            print(f"FileNotFoundError: {tool_name} not found or not in PATH for {self.source_path}")
         except Exception as e:
             final_status = "failed"
             self.update_status("failed", COLOR_STATUS_FAILED)
             if self.app_instance.log_window_visible and self.app_instance.log_text:
-                self.app_instance.master.after(0, lambda: self._append_to_log(f"ERROR during yt-dlp execution: {e}\n"))
-            print(f"Error during yt-dlp execution for URL {self.url}: {e}")
+                self.app_instance.master.after(0, lambda: self._append_to_log(f"ERROR during execution: {e}\n"))
+            print(f"Error during execution for {self.source_path}: {e}")
         finally:
             self.process = None
             if self.abort_button.winfo_exists():
                 self.abort_button.config(state="disabled")
             temp_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(self.item_id))
             if os.path.exists(temp_path):
-                shutil.rmtree(temp_path, ignore_errors=True)  # Always clean up the temporary folder
+                shutil.rmtree(temp_path, ignore_errors=True)
 
             self.app_instance.download_finished(self, final_status)
 
@@ -544,8 +549,7 @@ class DownloadItem:
                 speed = speed_match.group(1) if speed_match and speed_match.group(1) else 'N/A'
                 eta = speed_match.group(2) if speed_match and speed_match.group(2) else 'N/A'
 
-                self.update_status(f"{percent:.1f}% ({speed}, ETA {eta})",
-                                   COLOR_STATUS_PROGRESS)  # Removed "Downloading..." prefix
+                self.update_status(f"{percent:.1f}% ({speed}, ETA {eta})", COLOR_STATUS_PROGRESS)
             return
 
         if "merging formats" in line.lower() or "ffmpeg" in line.lower() or "postprocessing" in line.lower() or "extractaudio" in line.lower():
@@ -558,9 +562,33 @@ class DownloadItem:
             return
 
         if "downloading" in line.lower() and not self.is_merging:
-            self.update_status("Downloading...",
-                               COLOR_STATUS_PROGRESS)  # Keep this for initial download phase before percentages
+            self.update_status("Downloading...", COLOR_STATUS_PROGRESS)
             return
+
+    def _parse_ffmpeg_output_for_progress(self, line):
+        """Parses a line of FFmpeg output for progress."""
+        # Example FFmpeg output: frame= 1500 fps= 100 q=28.0 size=   12345kB time=00:00:10.00 bitrate=1000.0kbits/s speed=2.5x
+        time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})', line)
+        speed_match = re.search(r'speed=\s*([0-9\.]+)x', line)
+
+        if time_match:
+            hours = int(time_match.group(1))
+            minutes = int(time_match.group(2))
+            seconds = int(time_match.group(3))
+            current_time_seconds = hours * 3600 + minutes * 60 + seconds
+
+            speed_str = f"{speed_match.group(1)}x" if speed_match else "N/A"
+            self.update_status(f"Converting... ({self._format_seconds_to_dd_hh_mm_ss(current_time_seconds)}, Speed: {speed_str})", COLOR_STATUS_PROGRESS)
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar['mode'] != "indeterminate":
+                 self.progress_bar.config(mode="indeterminate")
+                 self.progress_bar.start()
+            self.is_merging = True
+        elif "video:" in line or "audio:" in line and "global headers" in line:
+            self.update_status("Converting...", COLOR_STATUS_PROGRESS)
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar['mode'] != "indeterminate":
+                self.progress_bar.config(mode="indeterminate")
+                self.progress_bar.start()
+            self.is_merging = True
 
     def update_status(self, text, color):
         """Updates the status label for this download item."""
@@ -588,23 +616,26 @@ class DownloadItem:
     def retry_download(self):
         """Resets the item and re-add it to the queue for retry."""
         self.status = "queued"
-        self.date_completed = 'N/A'  # Clear completion date
-        self.elapsed_time_seconds = 0  # Reset elapsed time
-        self.start_time = None  # Reset start time
-        self.is_aborted = False  # Clear any previous abort state
-        self.is_merging = False  # Clear any previous merging state
-        self.is_active_item = True  # Mark as active again
-        self.ready_for_download = True  # Assume ready for download after retry request (or could re-fetch title if needed)
+        self.date_completed = 'N/A'
+        self.elapsed_time_seconds = 0
+        self.start_time = None
+        self.is_aborted = False
+        self.is_merging = False
+        self.is_active_item = True
+        self.ready_for_download = True
 
-        # Re-queue the item
-        self.app_instance.queued_downloads.insert(0, self)  # Add to the front of the queue
-        self.app_instance._refresh_display_order()  # Refresh display to move it back to active section
+        self.app_instance.queued_downloads.insert(0, self)
+        self.app_instance._refresh_display_order()
         self.app_instance._set_status(f"Retrying download for '{self.video_title}'.", COLOR_STATUS_READY)
 
     def _open_file_location(self):
         """Opens the folder containing the downloaded file and highlights the file."""
-        # Determine the expected file extension based on mp3_conversion
-        expected_ext = ".mp3" if self.mp3_conversion else ".mp4"
+        # Determine the expected file extension based on mp3_conversion OR if it was a local conversion (always mp4)
+        if self.is_local_conversion:
+            expected_ext = ".mp4"
+        else:
+            expected_ext = ".mp3" if self.mp3_conversion else ".mp4"
+
         full_filepath = os.path.join(os.getcwd(), DOWNLOADS_DIR, self.filename + expected_ext)
 
         if not os.path.exists(full_filepath):
@@ -627,7 +658,8 @@ class YTDLPGUIApp:
         self.master = master
         self._setup_window(master)
 
-        self._configure_yt_dlp_path()
+        self._configure_yt_dlp_path() # Still needed for YouTube/XtremeStream
+        # FFmpeg path is assumed to be in system PATH for now
         self._create_menus()
 
         self._create_widgets()
@@ -636,21 +668,23 @@ class YTDLPGUIApp:
         self._load_downloads_from_local_history()
 
         self.master.after(100, self._process_queue_loop)
+        # Initialize UI state based on default source (YouTube)
         self.on_source_change(YOUTUBE_SOURCE)
-        self.master.after_idle(self._refresh_display_order)  # Call _refresh_display_order after mainloop starts
+        self.master.after_idle(self._refresh_display_order)
 
         self.log_window = None
         self.log_text = None
         self.log_window_visible = False
 
+        # New instance variable for selected local file path
+        self.selected_local_filepath = None
+
     def _setup_window(self, master):
-        master.title("YouTube Downloader powered by yt-dlp")
-        # Increased width to 1000 for better element spacing
+        master.title("Universal Video Downloader & Converter")
         master.geometry("1000x650")
-        # Set window to not be resizable
         master.resizable(False, False)
-        master.minsize(1000, 650)  # Set minimum size to initial size
-        master.maxsize(1000, 650)  # Set maximum size to initial size
+        master.minsize(1000, 650)
+        master.maxsize(1000, 650)
         try:
             master.iconbitmap("ico.ico")
         except Exception:
@@ -668,7 +702,7 @@ class YTDLPGUIApp:
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
         self.log_toggle_var = tk.BooleanVar(value=False)
-        view_menu.add_checkbutton(label="Show yt-dlp Process Log", variable=self.log_toggle_var,
+        view_menu.add_checkbutton(label="Show Process Log", variable=self.log_toggle_var,
                                   command=self._toggle_log_window)
 
     def _show_versions_info(self):
@@ -702,13 +736,13 @@ class YTDLPGUIApp:
         )
 
     def _toggle_log_window(self):
-        """Toggles the visibility of the yt-dlp process log window."""
+        """Toggles the visibility of the process log window."""
         self.log_window_visible = self.log_toggle_var.get()
 
         if self.log_window_visible:
             if not self.log_window or not self.log_window.winfo_exists():
                 self.log_window = tk.Toplevel(self.master)
-                self.log_window.title("yt-dlp Process Log")
+                self.log_window.title("Process Log")
                 self.log_window.geometry("600x400")
                 self.log_window.protocol("WM_DELETE_WINDOW", self._on_log_window_close)
 
@@ -744,14 +778,14 @@ class YTDLPGUIApp:
         self.main_frame.pack(fill="both", expand=True)
         self.main_frame.grid_columnconfigure(1, weight=1)
 
-        input_frame = tk.LabelFrame(self.main_frame, text="Add New Download", font=MAIN_FONT, padx=10, pady=10)
+        input_frame = tk.LabelFrame(self.main_frame, text="Add New Download/Conversion", font=MAIN_FONT, padx=10, pady=10)
         input_frame.pack(fill="x", pady=5)
         input_frame.grid_columnconfigure(1, weight=1)
 
         row_idx = 0
         tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=row_idx, column=0, sticky="w", padx=5, pady=2)
         self.source_var = tk.StringVar(value=YOUTUBE_SOURCE)
-        self.source_menu = tk.OptionMenu(input_frame, self.source_var, YOUTUBE_SOURCE, XTREAM_SOURCE,
+        self.source_menu = tk.OptionMenu(input_frame, self.source_var, YOUTUBE_SOURCE, XTREAM_SOURCE, LOCAL_SOURCE,
                                          command=self.on_source_change)
         self.source_menu.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
 
@@ -760,19 +794,30 @@ class YTDLPGUIApp:
         self.referer_entry = tk.Entry(input_frame, font=MAIN_FONT)
 
         row_idx += 1
-        tk.Label(input_frame, text="Target URL:", font=MAIN_FONT).grid(row=row_idx, column=0, sticky="w", padx=5,
-                                                                       pady=2)
+        # Target URL widgets (YouTube/XtremeStream)
+        self.url_label = tk.Label(input_frame, text="Target URL:", font=MAIN_FONT)
         self.url_entry = tk.Entry(input_frame, font=MAIN_FONT)
-        self.url_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
-        self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
-        self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
 
-        self.QUALITY_ROW_IDX = row_idx + 1
+        # Local File Widgets (for Local Source)
+        self.local_filepath_label = tk.Label(input_frame, text="No file selected", font=MAIN_FONT, anchor="w", wraplength=400)
+        self.browse_file_button = tk.Button(input_frame, text="Browse Local File", command=self._browse_local_file,
+                                            bg=COLOR_BROWSE_FILE_BUTTON, fg="white", font=SMALL_FONT, width=15)
+
+
+        self.QUALITY_ROW_IDX = row_idx + 1 # Dynamic row index for quality options
+
+        # YouTube/XtremeStream Quality
         self.quality_label = tk.Label(input_frame, text="Quality:", font=MAIN_FONT)
         self.quality_var = tk.StringVar(value="Auto (Best available)")
         self.quality_menu = tk.OptionMenu(input_frame, self.quality_var, "Auto (Best available)")
-        self.quality_label.grid(row=self.QUALITY_ROW_IDX, column=0, sticky="w", padx=5, pady=2)
-        self.quality_menu.grid(row=self.QUALITY_ROW_IDX, column=1, sticky="ew", padx=5, pady=2)
+
+        # Local Quality
+        self.local_quality_label = tk.Label(input_frame, text="Output Quality:", font=MAIN_FONT)
+        self.local_quality_var = tk.StringVar(value="Medium Quality MP4")
+        self.local_quality_menu = tk.OptionMenu(input_frame, self.local_quality_var,
+                                                 "Same as source", # New option, re-added
+                                                 "High Quality MP4", "Medium Quality MP4", "Low Quality MP4")
+
 
         row_idx = self.QUALITY_ROW_IDX + 1
         tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT).grid(row=row_idx, column=0,
@@ -782,13 +827,18 @@ class YTDLPGUIApp:
 
         row_idx += 1
         self.mp3_var = tk.BooleanVar()
-        self.mp3_check = tk.Checkbutton(input_frame, text="Convert to MP3", variable=self.mp3_var, font=MAIN_FONT)
+        self.mp3_check = tk.Checkbutton(input_frame, text="Convert to MP3 (for online sources)", variable=self.mp3_var, font=MAIN_FONT)
         self.mp3_check.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         row_idx += 1
-        self.add_to_queue_button = tk.Button(input_frame, text="Download", command=self._add_current_to_queue,
+        self.add_to_queue_button = tk.Button(input_frame, text="Add to Queue", command=self._add_current_to_queue,
                                              bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT)
         self.add_to_queue_button.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=10)
+
+        # Bind events
+        self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
+        self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
+
 
         control_buttons_frame = tk.Frame(self.main_frame)
         control_buttons_frame.pack(fill="x", pady=5)
@@ -845,12 +895,8 @@ class YTDLPGUIApp:
 
     def _on_downloads_canvas_resize(self, event):
         """Adjusts the width of the inner frame when the canvas resizes."""
-        # Update the width of the inner frame to match the canvas width
         self.downloads_canvas.itemconfig(self.downloads_canvas_window_id, width=event.width)
-        # Re-configure scroll region after width adjustment
         self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
-
-        # Re-call _refresh_display_order to update wraplengths
         self._refresh_display_order()
 
     def _initialize_download_management(self):
@@ -871,13 +917,26 @@ class YTDLPGUIApp:
             self.yt_dlp_path = 'yt-dlp.exe'
 
     def on_source_change(self, value):
-        """Adjusts UI based on selected source (YouTube or XtremeStream)."""
-        quality_row = self.QUALITY_ROW_IDX
-        referer_row = self.url_entry.grid_info()["row"] + 1
+        """Adjusts UI based on selected source (YouTube, XtremeStream, or Local)."""
+        # Hide all source-specific widgets first
+        self.referer_label.grid_forget()
+        self.referer_entry.grid_forget()
+        self.url_label.grid_forget()
+        self.url_entry.grid_forget()
+        self.quality_label.grid_forget()
+        self.quality_menu.grid_forget()
+        self.local_filepath_label.grid_forget()
+        self.browse_file_button.grid_forget()
+        self.local_quality_label.grid_forget()
+        self.local_quality_menu.grid_forget()
+        self.mp3_check.grid_forget() # Hide MP3 checkbox, re-grid if applicable
+
+        current_row_idx = self.source_menu.grid_info()["row"] + 1
 
         if value == YOUTUBE_SOURCE:
-            self.referer_label.grid_forget()
-            self.referer_entry.grid_forget()
+            self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            current_row_idx += 1
             self._update_quality_options_grouped(
                 [("Auto (Best available)", "Auto (Best available)")],
                 [],
@@ -887,46 +946,123 @@ class YTDLPGUIApp:
                 [("720", "Medium Quality - 720p")],
                 [("480", "Low Quality - 480p")]
             )
-            self.quality_label.grid(row=quality_row, column=0, sticky="w", padx=5, pady=2)
-            self.quality_menu.grid(row=quality_row, column=1, sticky="ew", padx=5, pady=2)
-            self._on_url_focus_out()
-        else:
-            self.quality_label.grid_forget()
-            self.quality_menu.grid_forget()
-            self.referer_label.grid(row=referer_row, column=0, sticky="w", padx=5, pady=2)
-            self.referer_entry.grid(row=referer_row, column=1, sticky="ew", padx=5, pady=2)
+            self.quality_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.quality_menu.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
+            self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
+            self.mp3_check.grid(row=current_row_idx + 1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+            self.mp3_check.config(state="normal") # Enable MP3 option for YouTube
 
-        last_input_row = self.mp3_check.grid_info()["row"]
-        if self.source_var.get() == XTREAM_SOURCE and self.referer_entry.winfo_ismapped():
-            last_input_row = max(last_input_row, self.referer_entry.grid_info()["row"])
-        elif self.source_var.get() == YOUTUBE_SOURCE and self.quality_menu.winfo_ismapped():
-            last_input_row = max(last_input_row, self.quality_menu.grid_info()["row"])
-        self.add_to_queue_button.grid(row=last_input_row + 1, column=0, columnspan=2, sticky="ew", pady=10)
+        elif value == XTREAM_SOURCE:
+            self.referer_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.referer_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            current_row_idx += 1
+            self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
+            self.url_entry.bind("<FocusOut>", self._on_url_focus_out) # Keep focus out for XtremeStream too
+            self.mp3_check.grid(row=current_row_idx + 1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+            self.mp3_check.config(state="normal") # Enable MP3 option for XtremeStream
+
+        elif value == LOCAL_SOURCE:
+            # Unbind previous URL-related events
+            self.url_entry.unbind("<Return>")
+            self.url_entry.unbind("<FocusOut>")
+
+            self.local_filepath_label.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            self.browse_file_button.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            current_row_idx += 1
+            self.local_quality_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.local_quality_menu.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            # Disable MP3 conversion checkbox for local (always MP4)
+            self.mp3_check.grid(row=current_row_idx + 1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+            self.mp3_check.config(state="disabled")
+            self.mp3_var.set(False) # Ensure it's unchecked for local conversions
+            # Clear url and filename entries when switching to local
+            self.url_entry.delete(0, END)
+            self.filename_entry.delete(0, END)
+            self.local_filepath_label.config(text="No file selected")
+            self.selected_local_filepath = None # Reset selected file
+            self.filename_entry.delete(0,END) # Clear filename suggestion
+
+
+        # Adjust the "Add to Queue" button's position
+        # Get the row of the mp3_check, or the last shown widget if mp3_check is hidden.
+        # Ensure 'current_row_idx' correctly reflects the last used row for placing the button.
+        final_input_row = max(
+            self.filename_entry.grid_info()["row"] if self.filename_entry.winfo_ismapped() else -1,
+            self.mp3_check.grid_info()["row"] if self.mp3_check.winfo_ismapped() else -1,
+            self.quality_menu.grid_info()["row"] if self.quality_menu.winfo_ismapped() else -1,
+            self.local_quality_menu.grid_info()["row"] if self.local_quality_menu.winfo_ismapped() else -1,
+            self.url_entry.grid_info()["row"] if self.url_entry.winfo_ismapped() else -1,
+            self.referer_entry.grid_info()["row"] if self.referer_entry.winfo_ismapped() else -1,
+            self.browse_file_button.grid_info()["row"] if self.browse_file_button.winfo_ismapped() else -1
+        )
+        self.add_to_queue_button.grid(row=final_input_row + 1, column=0, columnspan=2, sticky="ew", pady=10)
+
 
     def _set_status(self, text, color="black"):
         """Updates the main status bar."""
         self.status_bar.config(text=text, fg=color)
 
+    def _browse_local_file(self):
+        """Opens a file dialog to select a local video file for conversion."""
+        filepath = filedialog.askopenfilename(
+            title="Select Video File",
+            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.flv *.wmv *.webm"),
+                       ("All files", "*.*")]
+        )
+        if filepath:
+            self.selected_local_filepath = filepath
+            # Update label to show selected path, truncate if too long
+            display_path = filepath
+            if len(display_path) > 50: # Arbitrary length for truncation
+                display_path = "..." + display_path[-47:]
+            self.local_filepath_label.config(text=display_path)
+
+            # Suggest filename without extension
+            self.filename_entry.delete(0, END)
+            self.filename_entry.insert(0, os.path.splitext(os.path.basename(filepath))[0])
+        else:
+            self.selected_local_filepath = None
+            self.local_filepath_label.config(text="No file selected")
+            self.filename_entry.delete(0, END)
+
+
     def _add_current_to_queue(self):
-        """Adds the current input values as a new download item to the queue."""
-        url = self.url_entry.get().strip()
-        if not url:
-            messagebox.showwarning("Input Error", "Target URL is required.")
-            return
-
-        if not (url.startswith("http://") or url.startswith("https://")):
-            messagebox.showwarning("Input Error", "Invalid URL. Must start with http:// or https://")
-            return
-
+        """Adds the current input values as a new download/conversion item to the queue."""
         source = self.source_var.get()
-        quality = self.quality_var.get()
-        filename_input = self.filename_entry.get().strip()
+        item_data = {}
+        source_path = ""
+        quality = "N/A"
+        filename_provided_by_user = bool(self.filename_entry.get().strip())
+        filename_for_item_data = self.filename_entry.get().strip()
+        mp3_conversion = False # Default
 
-        filename_provided_by_user = bool(filename_input)
+        if source == LOCAL_SOURCE:
+            source_path = self.selected_local_filepath
+            if not source_path or not os.path.exists(source_path):
+                messagebox.showwarning("Input Error", "Please select a local video file.")
+                return
+            quality = self.local_quality_var.get()
+            # For local conversion, force mp3_conversion to False (always MP4 output)
+            mp3_conversion = False
+            if not filename_for_item_data:
+                filename_for_item_data = os.path.splitext(os.path.basename(source_path))[0] # Use base filename
+            video_title = os.path.basename(source_path) # Title for display will be the filename
 
-        filename_for_item_data = filename_input if filename_input else f"VideoPlayback_{self.download_item_counter}"
+        else: # YouTube or XtremeStream
+            source_path = self.url_entry.get().strip()
+            if not source_path:
+                messagebox.showwarning("Input Error", "Target URL is required.")
+                return
+            if not (source_path.startswith("http://") or source_path.startswith("https://")):
+                messagebox.showwarning("Input Error", "Invalid URL. Must start with http:// or https://")
+                return
+            quality = self.quality_var.get()
+            mp3_conversion = self.mp3_var.get()
+            video_title = 'Fetching Title...' # Will be updated by fetch_title_async
 
-        mp3_conversion = self.mp3_var.get()
         referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
 
         self.download_item_counter += 1
@@ -934,15 +1070,15 @@ class YTDLPGUIApp:
 
         item_data = {
             'id': item_id,
-            'url': url,
+            'source_path': source_path, # Generic field for URL or File Path
             'quality': quality,
             'filename': filename_for_item_data,
             'mp3_conversion': mp3_conversion,
             'source': source,
             'referer': referer,
-            'video_title': 'Fetching Title...',  # This will be updated by fetch_title_async
+            'video_title': video_title,
             'status': 'queued',
-            'date_added': time.strftime("%m/%d/%y"),  # Updated format
+            'date_added': time.strftime("%m/%d/%y"),
             'filename_provided_by_user': filename_provided_by_user,
             'elapsed_time_seconds': 0
         }
@@ -952,33 +1088,39 @@ class YTDLPGUIApp:
         self.download_items_map[item_id] = new_item
         self.total_downloads_added += 1
         self._refresh_display_order()
-        self._set_status(f"Added '{url}' to queue.", COLOR_STATUS_READY)
+        self._set_status(f"Added '{source_path}' to queue.", COLOR_STATUS_READY)
 
+        # Clear input fields
         self.url_entry.delete(0, END)
         self.filename_entry.delete(0, END)
         self.mp3_var.set(False)
         self.referer_entry.delete(0, END)
+        self.local_filepath_label.config(text="No file selected")
+        self.selected_local_filepath = None
         self.url_entry.focus_set()
         self.alert_on_completion_for_session = True
 
+
     def _add_to_queue_on_enter(self, event=None):
         """Handles adding to queue when Enter is pressed in URL entry."""
-        self._add_current_to_queue()
+        # Only process if current source is not Local
+        if self.source_var.get() != LOCAL_SOURCE:
+            self._add_current_to_queue()
 
     def _on_url_focus_out(self, event=None):
         """
-        Attempts to pre-fill filename based on URL if not provided by user and source is YouTube.
-        Prioritizes fetched title, then sensible fallback.
+        Attempts to pre-fill filename based on URL if not provided by user and source is YouTube/XtremeStream.
         """
+        if self.source_var.get() == LOCAL_SOURCE:
+            return # Do not pre-fill for local source
+
         url = self.url_entry.get().strip()
-        if url and self.source_var.get() == YOUTUBE_SOURCE and not self.filename_entry.get().strip():
-            # Create a dummy item to fetch title without adding to queue
-            # This is a temporary DownloadItem solely for title fetching preview
+        if url and not self.filename_entry.get().strip():
             temp_item_data = {
-                'id': -1,  # Dummy ID (won't be saved)
-                'url': url,
+                'id': -1,
+                'source_path': url,
                 'quality': self.quality_var.get(),
-                'filename': '',  # Empty for fetching
+                'filename': '',
                 'mp3_conversion': self.mp3_var.get(),
                 'source': self.source_var.get(),
                 'referer': self.referer_entry.get().strip(),
@@ -988,25 +1130,19 @@ class YTDLPGUIApp:
                 'filename_provided_by_user': False,
                 'elapsed_time_seconds': 0
             }
-            temp_item = DownloadItem(self, temp_item_data, is_active_item=True)  # Treat as active for fetching logic
+            temp_item = DownloadItem(self, temp_item_data, is_active_item=True)
 
             def _update_filename_after_fetch():
-                # Only update the entry if the user hasn't typed anything in the meantime
                 if not self.filename_entry.get().strip():
-                    if temp_item.is_title_fetched and temp_item.video_title not in ['Unknown Title',
-                                                                                    'Fetching Title...']:
+                    if temp_item.is_title_fetched and temp_item.video_title not in ['Unknown Title', 'Fetching Title...']:
                         sanitized_title = re.sub(r'[\\/:*?"<>|]', '', temp_item.video_title)
                         self.filename_entry.delete(0, END)
-                        # Clip preview filename for display if too long
-                        preview_filename = sanitized_title[:60] if len(
-                            sanitized_title) > 60 else sanitized_title  # Adjusted clip length to fit wider window
+                        preview_filename = sanitized_title[:60] if len(sanitized_title) > 60 else sanitized_title
                         self.filename_entry.insert(0, preview_filename)
                     else:
-                        # Fallback to generic name if title fetch failed or is still pending
                         self.filename_entry.delete(0, END)
-                        self.filename_entry.insert(0, f"VideoPlayback_Preview")  # Generic name for preview
+                        self.filename_entry.insert(0, f"VideoPlayback_Preview")
 
-            # Fetch title asynchronously and then update filename_entry after a short delay to allow fetch to complete
             threading.Thread(
                 target=lambda: (temp_item.fetch_title_async(), self.master.after(500, _update_filename_after_fetch)),
                 daemon=True).start()
@@ -1065,40 +1201,38 @@ class YTDLPGUIApp:
         """Manages the download queue, starting new downloads as slots become free."""
         active_count = len(self.active_downloads)
 
-        # Find the first ready item in the queue that can be started
         next_item_to_start = None
         for i, item in enumerate(self.queued_downloads):
-            if item.ready_for_download:  # Only pick if title is fetched and it's ready
+            if item.ready_for_download:
                 next_item_to_start = self.queued_downloads.pop(i)
                 break
 
         if next_item_to_start and active_count < MAX_CONCURRENT_DOWNLOADS:
             self.active_downloads.append(next_item_to_start)
+            self._set_status(f"Starting {next_item_to_start.source} for {next_item_to_start.video_title}...", COLOR_STATUS_PROGRESS)
             next_item_to_start.start_download()
             self.is_queue_processing_active = True
             self.all_downloads_completed.clear()
-            self._set_status(f"Starting download for {next_item_to_start.video_title}...", COLOR_STATUS_PROGRESS)
         elif not self.active_downloads and not self.queued_downloads and self.is_queue_processing_active:
-            # All downloads are finished
             self.is_queue_processing_active = False
             self.all_downloads_completed.set()
 
             if self.alert_on_completion_for_session and self.total_downloads_added > 0:
-                messagebox.showinfo("Downloads Complete",
-                                    f"All {self.completed_downloads_count} downloads finished!")
+                messagebox.showinfo("Tasks Complete",
+                                    f"All {self.completed_downloads_count} tasks finished!")
                 self.alert_on_completion_for_session = False
                 self.completed_downloads_count = 0
                 self.total_downloads_added = 0
-            self._set_status("All downloads finished. Ready.", COLOR_STATUS_COMPLETE)
+            self._set_status("All tasks finished. Ready.", COLOR_STATUS_COMPLETE)
         self.master.after(1000, self._process_queue_loop)
 
     def download_finished(self, item, final_status):
-        """Called by a DownloadItem when its download process completes (success/fail/abort)."""
+        """Called by a DownloadItem when its process completes (success/fail/abort)."""
         if item in self.active_downloads:
             self.active_downloads.remove(item)
 
         item.status = final_status
-        item.date_completed = time.strftime("%m/%d/%y")  # Updated format
+        item.date_completed = time.strftime("%m/%d/%y")
         if item.start_time:
             item.elapsed_time_seconds = int(time.time() - item.start_time)
         else:
@@ -1110,11 +1244,11 @@ class YTDLPGUIApp:
 
         if final_status == "completed":
             self.completed_downloads_count += 1
-            self._set_status(f"Download for '{item.video_title}' completed!", COLOR_STATUS_COMPLETE)
+            self._set_status(f"Task for '{item.video_title}' completed!", COLOR_STATUS_COMPLETE)
         elif final_status == "aborted":
-            self._set_status(f"Download for '{item.video_title}' aborted.", COLOR_STATUS_ABORTED)
+            self._set_status(f"Task for '{item.video_title}' aborted.", COLOR_STATUS_ABORTED)
         else:
-            self._set_status(f"Download for '{item.video_title}' failed.", COLOR_STATUS_FAILED)
+            self._set_status(f"Task for '{item.video_title}' failed.", COLOR_STATUS_FAILED)
 
         self._refresh_display_order()
 
@@ -1138,71 +1272,62 @@ class YTDLPGUIApp:
             self.download_items_map.pop(item_id, None)
 
         self._refresh_display_order()
-        self._set_status("Download queue cleared.", COLOR_STATUS_READY)
-        messagebox.showinfo("Queue Cleared", "All pending downloads have been cleared.")
+        self._set_status("Task queue cleared.", COLOR_STATUS_READY)
+        messagebox.showinfo("Queue Cleared", "All pending tasks have been cleared.")
 
     def _clear_finished_history(self):
-        """Clears all items from the finished downloads history."""
-        if messagebox.askyesno("Clear History", "Are you sure you want to clear all download history? "
-                                                "This will not delete the actual downloaded files."):
+        """Clears all items from the finished tasks history."""
+        if messagebox.askyesno("Clear History", "Are you sure you want to clear all task history? "
+                                                "This will not delete the actual converted/downloaded files."):
             ids_to_remove = [item.item_id for item in self.download_items_map.values() if not item.is_active_item]
             for item_id in ids_to_remove:
                 self.download_items_map.pop(item_id, None)
 
             self._save_downloads_to_local_history()
             self._refresh_display_order()
-            self._set_status("Download history cleared.", COLOR_STATUS_READY)
+            self._set_status("Task history cleared.", COLOR_STATUS_READY)
 
     def _refresh_display_order(self):
         """
         Destroys and recreates all download item frames to ensure correct order
         and visibility (active vs. history).
-        Now includes a header row with clickable column headers for sorting.
         """
-        # Ensure the canvas and its inner frame have their correct sizes before calculating widths
         self.downloads_canvas.update_idletasks()
         self.downloads_frame_inner.update_idletasks()
 
         for widget in self.downloads_frame_inner.winfo_children():
             widget.destroy()
 
-        # --- Header Row ---
         header_frame = tk.Frame(self.downloads_frame_inner, bg="#e0e0e0")
         header_frame.pack(fill="x", padx=5, pady=(0, 2))
         columns = [
             ("Name", 0),
-            ("Status", 1),  # Adjusted column index
-            ("Date Added", 2), # Adjusted column index
-            ("Date Completed", 3), # Adjusted column index
-            ("Time / ETA", 4), # Adjusted column index
-            ("Action", 5)  # Adjusted column index
+            ("Status", 1),
+            ("Date Added", 2),
+            ("Date Completed", 3),
+            ("Time / ETA", 4),
+            ("Action", 5)
         ]
-        # Dynamically set column weights for the header frame to match the data rows
-        # These weights are crucial for alignment
-        header_frame.columnconfigure(0, weight=4)  # Name
-        header_frame.columnconfigure(1, weight=2)  # Status/Progress
-        header_frame.columnconfigure(2, weight=1)  # Date Added
-        header_frame.columnconfigure(3, weight=1)  # Date Completed
-        header_frame.columnconfigure(4, weight=1)  # Time/ETA
-        header_frame.columnconfigure(5, weight=1)  # Action
+        header_frame.columnconfigure(0, weight=4)
+        header_frame.columnconfigure(1, weight=2)
+        header_frame.columnconfigure(2, weight=1)
+        header_frame.columnconfigure(3, weight=1)
+        header_frame.columnconfigure(4, weight=1)
+        header_frame.columnconfigure(5, weight=1)
 
         for col_name, col_idx in columns:
             lbl = tk.Label(header_frame, text=col_name, font=BOLD_FONT, bg="#e0e0e0", borderwidth=1, relief="ridge")
             lbl.grid(row=0, column=col_idx, sticky="ew", padx=1, pady=0)
             lbl.bind("<Button-1>", lambda e, idx=col_idx: self._on_header_click(idx))
 
-        # --- Sorting ---
-        # Default sort_col values adjusted for new column indices.
-        # Default: Date Added (now index 2) newest first (True)
         sort_col = getattr(self, '_current_sort_col', 2)
         sort_reverse = getattr(self, '_current_sort_reverse', True)
         all_display_items = list(self.download_items_map.values())
 
         def sort_key(item):
-            # Sorting logic adjusted for new column indices
             if sort_col == 0:  # Name
                 return (item.video_title or item.filename or "").lower()
-            elif sort_col == 1:  # Status (can sort by status text)
+            elif sort_col == 1:  # Status
                 return item.status.lower()
             elif sort_col == 2:  # Date Added
                 try:
@@ -1216,7 +1341,7 @@ class YTDLPGUIApp:
                     return 0
             elif sort_col == 4:  # Time/ETA (elapsed time)
                 return item.elapsed_time_seconds
-            else:  # Default fallback sort for Action or invalid
+            else:
                 return 0
 
         all_display_items.sort(key=sort_key, reverse=sort_reverse)
@@ -1225,11 +1350,7 @@ class YTDLPGUIApp:
             item_obj.parent_frame = self.downloads_frame_inner
             item_obj._build_frame_widgets()
             item_obj.frame.pack(fill="x", padx=5, pady=3)
-            # IMPORTANT: Call _update_title_label here, but it needs to calculate
-            # widths based on the parent frame's *actual* rendered width.
-            # This is why we call update_idletasks on the canvas/inner_frame above.
-            item_obj._update_title_label()  # This will now set dynamic wraplengths and apply clipping
-            # Status update will now handle progress bar visibility and label text based on active/inactive
+            item_obj._update_title_label()
             item_obj.update_status(item_obj.status, item_obj._get_status_color(item_obj.status))
 
         self.downloads_frame_inner.update_idletasks()
@@ -1237,21 +1358,20 @@ class YTDLPGUIApp:
 
     def _on_header_click(self, col_idx):
         """Handles sorting when a header is clicked."""
-        prev_col = getattr(self, '_current_sort_col', 2) # Default to Date Added (new index 2)
+        prev_col = getattr(self, '_current_sort_col', 2)
         prev_rev = getattr(self, '_current_sort_reverse', True)
         if prev_col == col_idx:
             self._current_sort_reverse = not prev_rev
         else:
             self._current_sort_col = col_idx
-            # Default sorting order: Date Added/Completed newest first (True), others A-Z (False)
-            self._current_sort_reverse = True if col_idx in [2, 3] else False # Adjusted indices for Date Added/Completed
+            self._current_sort_reverse = True if col_idx in [2, 3] else False
         self._refresh_display_order()
 
     def _get_item_data_for_history(self, item_obj):
         """Prepares a dictionary of item data for saving to history."""
         return {
             'id': item_obj.item_id,
-            'url': item_obj.url,
+            'source_path': item_obj.source_path, # Now source_path
             'quality': item_obj.quality,
             'filename': item_obj.filename,
             'mp3_conversion': item_obj.mp3_conversion,
@@ -1266,14 +1386,12 @@ class YTDLPGUIApp:
         }
 
     def _save_downloads_to_local_history(self):
-        """Saves the current finished downloads data (from map) to a local JSON file."""
+        """Saves the current finished tasks data (from map) to a local JSON file."""
         history_to_save = [
             self._get_item_data_for_history(item)
             for item in self.download_items_map.values()
             if not item.is_active_item
         ]
-        # Sort by date_completed in descending order (newest first) for consistent display order on load
-        # Use a tuple for the time.strptime argument to match the new format
         history_to_save.sort(key=lambda x: time.mktime(time.strptime(x['date_completed'], "%m/%d/%y")) if x[
                                                                                                               'date_completed'] != 'N/A' else time.time(),
                              reverse=True)
@@ -1285,7 +1403,7 @@ class YTDLPGUIApp:
             print(f"Error saving history: {e}")
 
     def _load_downloads_from_local_history(self):
-        """Loads download history from a local JSON file on startup."""
+        """Loads task history from a local JSON file on startup."""
         if os.path.exists(HISTORY_FILE):
             try:
                 with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
@@ -1301,6 +1419,11 @@ class YTDLPGUIApp:
                         self.download_item_counter = 0
 
                     for item_data in loaded_history_data:
+                        # Handle backward compatibility for 'url' field if 'source_path' is missing
+                        if 'source_path' not in item_data and 'url' in item_data:
+                            item_data['source_path'] = item_data['url']
+                            del item_data['url'] # Clean up the old key if you want to standardize
+
                         # Before creating DownloadItem, parse date_added and date_completed to ensure
                         # they are in the expected "MM/DD/YY" format for consistency, especially if loading
                         # from an older history file format.
@@ -1358,3 +1481,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
