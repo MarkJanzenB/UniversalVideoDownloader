@@ -6,6 +6,9 @@ import urllib.request
 
 YT_DLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 YT_DLP_EXE = "yt-dlp.exe"
+FFMPEG_EXE = "ffmpeg.exe"  # Define FFmpeg executable name
+APP_EXE_NAME = "YoutubeDownloader.exe"  # Define the main application executable name
+
 
 def ensure_installed(package):
     try:
@@ -13,6 +16,7 @@ def ensure_installed(package):
     except ModuleNotFoundError:
         print(f"📦 {package} not found. Installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
 
 def download_yt_dlp():
     if not os.path.isfile(YT_DLP_EXE):
@@ -26,29 +30,85 @@ def download_yt_dlp():
     else:
         print(f"✔️ {YT_DLP_EXE} already exists.")
 
-def build_exe():
+
+def is_ffmpeg_available(location='path'):
+    """
+    Checks if FFmpeg is available in PATH or in the local directory.
+    location='path': checks system PATH
+    location='local': checks current working directory
+    """
+    if location == 'path':
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                           timeout=5)
+            print(f"✔️ FFmpeg found in system PATH.")
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            print(f"⚠️ FFmpeg not found in system PATH.")
+            return False
+    elif location == 'local':
+        if os.path.isfile(FFMPEG_EXE):
+            print(f"✔️ {FFMPEG_EXE} found in current directory.")
+            return True
+        else:
+            print(f"⚠️ {FFMPEG_EXE} not found in current directory.")
+            return False
+    return False
+
+
+def build_exe(ffmpeg_to_bundle=False):
     import PyInstaller.__main__
-    PyInstaller.__main__.run([
-        'YoutubeDownloader.py',
+
+    pyinstaller_args = [
+        'UniversalVideoDownloader.py',
         '--onefile',
         '--windowed',
         '--icon=Ico.ico',
-        f'--add-binary={YT_DLP_EXE};.'
-    ])
+        f'--add-binary={YT_DLP_EXE};.'  # Always bundle yt-dlp.exe
+    ]
+
+    if ffmpeg_to_bundle:
+        # Check if ffmpeg.exe exists locally to bundle it
+        if os.path.isfile(FFMPEG_EXE):
+            pyinstaller_args.append(f'--add-binary={FFMPEG_EXE};.')
+            print(f"📦 Bundling {FFMPEG_EXE} from current directory.")
+        else:
+            print(f"❌ Cannot bundle {FFMPEG_EXE}. File not found in current directory.")
+            print(f"   Please download FFmpeg (e.g., from https://www.gyan.dev/ffmpeg/builds/ )")
+            print(f"   and place {FFMPEG_EXE} (and its required DLLs if any) in the project root.")
+            print("   Proceeding without FFmpeg bundling.")
+
+    PyInstaller.__main__.run(pyinstaller_args)
+
 
 def move_exe_to_root():
     dist_folder = 'dist'
-    exe_name = 'YoutubeDownloader.exe'
-    exe_path = os.path.join(dist_folder, exe_name)
+    exe_path = os.path.join(dist_folder, APP_EXE_NAME)  # Use APP_EXE_NAME
     if os.path.isfile(exe_path):
-        shutil.move(exe_path, exe_name)
-        print(f"✅ Moved {exe_name} to root folder.")
+        shutil.move(exe_path, APP_EXE_NAME)  # Use APP_EXE_NAME
+        print(f"✅ Moved {APP_EXE_NAME} to root folder.")
     else:
         print(f"⚠️ EXE not found in {dist_folder}. Nothing moved.")
 
+
+def delete_existing_exe():
+    """Deletes the main application executable if it exists in the root directory."""
+    if os.path.isfile(APP_EXE_NAME):
+        try:
+            os.remove(APP_EXE_NAME)
+            print(f"🗑️ Deleted existing {APP_EXE_NAME}.")
+        except OSError as e:
+            print(f"❌ Error deleting existing {APP_EXE_NAME}: {e}")
+            print("Please close any running instances of the application and try again.")
+            sys.exit(1)
+    else:
+        print(f"✔️ No existing {APP_EXE_NAME} found to delete.")
+
+
 def clean_build_files():
     folders = ['build', '__pycache__', 'dist']
-    files = ['YoutubeDownloader.spec']
+    files = ['YoutubeDownloader.spec']  # This assumes your spec file name
 
     for folder in folders:
         if os.path.isdir(folder):
@@ -60,21 +120,41 @@ def clean_build_files():
             os.remove(file)
             print(f"🗑️ Deleted file: {file}")
 
+
 if __name__ == "__main__":
-    if not os.path.isfile('YoutubeDownloader.py'):
-        print("❌ Error: YoutubeDownloader.py not found in the current directory.")
+    if not os.path.isfile('UniversalVideoDownloader.py'):
+        print("❌ Error: UniversalVideoDownloader.py not found in the current directory.")
         sys.exit(1)
 
     ensure_installed('PyInstaller')
     download_yt_dlp()
 
+    # Determine FFmpeg bundling status
+    bundle_ffmpeg = False
+    if not is_ffmpeg_available(location='path'):
+        print("FFmpeg is not in system PATH.")
+        if is_ffmpeg_available(location='local'):
+            print(f"Found {FFMPEG_EXE} in current directory. It will be bundled.")
+            bundle_ffmpeg = True
+        else:
+            print(f"FFmpeg will NOT be bundled as {FFMPEG_EXE} was not found in the current directory.")
+            print(f"To bundle FFmpeg, please download a static build (e.g., from https://www.gyan.dev/ffmpeg/builds/ )")
+            print(
+                f"and place the {FFMPEG_EXE} (and any accompanying DLLs like 'ffplay.exe', 'ffprobe.exe' if part of the package) in the project root.")
+            print(
+                "You can still proceed with the build, but local video conversion might not work if FFmpeg is not otherwise available.")
+    else:
+        print("FFmpeg is in system PATH, so it will not be bundled (relying on system installation).")
+
+    # Delete existing EXE before building
+    delete_existing_exe()
+
     print("🚀 Building EXE...\n")
     sys.stdout.flush()
-    build_exe()
+    build_exe(ffmpeg_to_bundle=bundle_ffmpeg)
 
     move_exe_to_root()
 
-    # Ensure the prompt shows up before exiting
     print("\n✅ Build complete!")
     sys.stdout.flush()
 
@@ -86,5 +166,4 @@ if __name__ == "__main__":
         else:
             print("⚠️ Skipped cleanup.")
     except EOFError:
-        # This can happen if PyInstaller hijacks stdin
         print("⚠️ Could not prompt for cleanup (stdin not available).")

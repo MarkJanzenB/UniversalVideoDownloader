@@ -11,14 +11,16 @@ import re
 import json
 import tkinter.font
 
-# --- Constants for consistent naming and values --
-DOWNLOADS_DIR = "downloads"
+# --- Constants for consistent naming and values ---
+# These are now mostly internal or default values, can be overridden by settings
+DEFAULT_DOWNLOADS_DIR = "downloads"
 TEMP_SUBDIR = "temp"
 YOUTUBE_SOURCE = "YouTube"
 XTREAM_SOURCE = "XtremeStream"
-LOCAL_SOURCE = "Local" # New constant for local video conversion
-MAX_CONCURRENT_DOWNLOADS = 2
-HISTORY_FILE = "download_history.json"
+LOCAL_SOURCE = "Local"
+DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2  # Default, overridden by settings
+HISTORY_FILE = "download_history.json"  # History file is always fixed
+CONFIG_FILE = "config.json"  # Configuration file name
 
 # Colors for buttons/status
 COLOR_ADD_BUTTON = "#28A745"  # Green
@@ -26,7 +28,7 @@ COLOR_ABORT_BUTTON = "#DC3545"  # Red
 COLOR_CLEAR_BUTTON = "#FFC107"  # Yellow-Orange
 COLOR_OPEN_FOLDER_BUTTON = "#6C754C"  # Dark Grey/Greenish Grey
 COLOR_OPEN_FILE_BUTTON = "#17A2B8"  # Info Blue/Cyan
-COLOR_BROWSE_FILE_BUTTON = "#007BFF" # Blue for browse
+COLOR_BROWSE_FILE_BUTTON = "#007BFF"  # Blue for browse
 
 COLOR_STATUS_READY = "black"
 COLOR_STATUS_PROGRESS = "#007BFF"  # Blue
@@ -52,13 +54,9 @@ class DownloadItem:
         self.app_instance = app_instance
 
         self.item_id = item_data.get('id')
-        # Handle backward compatibility: check for 'source_path', otherwise use 'url'
-        self.source_path = item_data.get('source_path', item_data.get('url')) # Fallback from 'url'
+        self.source_path = item_data.get('source_path', item_data.get('url'))
         self.quality = item_data.get('quality', 'N/A')
-
-        raw_filename = item_data.get('filename')
-        self.filename = str(raw_filename) if raw_filename is not None else ''
-
+        self.filename = str(item_data.get('filename', ''))
         self.mp3_conversion = item_data.get('mp3_conversion', False)
         self.source = item_data.get('source', 'N/A')
         self.referer = item_data.get('referer', '')
@@ -69,28 +67,26 @@ class DownloadItem:
         self.filename_provided_by_user = item_data.get('filename_provided_by_user', False)
         self.elapsed_time_seconds = item_data.get('elapsed_time_seconds', 0)
 
-        # New flag: Is this a local video conversion?
         self.is_local_conversion = (self.source == LOCAL_SOURCE)
 
-        # If it's a local conversion, the title is simply the filename, and it's immediately ready
         if self.is_local_conversion:
             self.video_title = os.path.basename(self.source_path)
-            self.filename = os.path.splitext(os.path.basename(self.source_path))[0] # Set filename to base name without extension
+            self.filename = os.path.splitext(os.path.basename(self.source_path))[0]
             self.is_title_fetched = True
             self.ready_for_download = True
-            self.expected_final_ext = ".mp4" # Local conversions are always MP4 as per request
+            self.expected_final_ext = ".mp4"
         else:
             self.is_title_fetched = self.filename_provided_by_user or (self.video_title != 'Fetching Title...')
-            self.ready_for_download = not (is_active_item and not self.filename_provided_by_user and not self.is_title_fetched)
+            self.ready_for_download = not (
+                        is_active_item and not self.filename_provided_by_user and not self.is_title_fetched)
             self.expected_final_ext = ".mp3" if self.mp3_conversion else ".mp4"
-
 
         self.process = None
         self.output_queue = queue.Queue()
         self.start_time = None
         self.last_update_time = None
         self.is_aborted = False
-        self.is_merging = False # Used for yt-dlp's merging phase
+        self.is_merging = False
         self.is_active_item = is_active_item
 
         self.frame = None
@@ -105,12 +101,12 @@ class DownloadItem:
             self.frame.destroy()
 
         self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=2, pady=2, bg="#f0f0f0")
-        self.frame.columnconfigure(0, weight=4)  # Name
-        self.frame.columnconfigure(1, weight=2)  # Status/Progress
-        self.frame.columnconfigure(2, weight=1)  # Date Added
-        self.frame.columnconfigure(3, weight=1)  # Date Completed
-        self.frame.columnconfigure(4, weight=1)  # Time/ETA
-        self.frame.columnconfigure(5, weight=1)  # Action
+        self.frame.columnconfigure(0, weight=4)
+        self.frame.columnconfigure(1, weight=2)
+        self.frame.columnconfigure(2, weight=1)
+        self.frame.columnconfigure(3, weight=1)
+        self.frame.columnconfigure(4, weight=1)
+        self.frame.columnconfigure(5, weight=1)
 
         self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", justify="left")
         self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
@@ -139,8 +135,7 @@ class DownloadItem:
                                              bg="#f0f0f0", width=10)
         self.date_completed_label.grid(row=0, column=3, sticky="w", padx=2, pady=0)
 
-        self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0",
-                                           width=8)
+        self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0", width=8)
         self.elapsed_time_label.grid(row=0, column=4, sticky="w", padx=2, pady=0)
 
         self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
@@ -191,23 +186,18 @@ class DownloadItem:
         return "black"
 
     def _format_seconds_to_dd_hh_mm_ss(self, total_seconds):
-        """
-        Formats total seconds into HH:MM:SS.
-        """
+        """Formats total seconds into HH:MM:SS."""
         if total_seconds < 0:
             total_seconds = 0
-
         hours = int(total_seconds // 3600)
         remaining_seconds = total_seconds % 3600
         minutes = int(remaining_seconds // 60)
         seconds = int(remaining_seconds % 60)
-
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def fetch_title_async(self):
         """Fetches the video title asynchronously and updates the label. Only for YouTube/XtremeStream."""
         if self.is_local_conversion:
-            # No title fetching needed for local files, it's just the filename
             self.is_title_fetched = True
             self.ready_for_download = True
             self.app_instance.master.after(0, self.app_instance._refresh_display_order)
@@ -215,12 +205,7 @@ class DownloadItem:
 
         def _fetch():
             try:
-                command = [
-                    self.app_instance.yt_dlp_path,
-                    "--print-json",
-                    "--skip-download",
-                    self.source_path
-                ]
+                command = [self.app_instance.yt_dlp_path, "--print-json", "--skip-download", self.source_path]
                 if self.source == XTREAM_SOURCE and self.referer:
                     command += ["--add-header", f"referer: {self.referer}"]
 
@@ -240,8 +225,7 @@ class DownloadItem:
 
             except FileNotFoundError:
                 self.video_title = "Error: yt-dlp.exe not found."
-                if not self.filename_provided_by_user:
-                    self.filename = f"VideoPlayback_{self.item_id}"
+                if not self.filename_provided_by_user: self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
                 self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
@@ -249,8 +233,7 @@ class DownloadItem:
                 print(f"FileNotFoundError: yt-dlp.exe not found or not in PATH for URL: {self.source_path}")
             except subprocess.CalledProcessError as e:
                 self.video_title = f"Error fetching title: Command failed. {e.stderr.strip()}"
-                if not self.filename_provided_by_user:
-                    self.filename = f"VideoPlayback_{self.item_id}"
+                if not self.filename_provided_by_user: self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
                 self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
@@ -258,8 +241,7 @@ class DownloadItem:
                 print(f"subprocess.CalledProcessError for URL {self.source_path}: {e.stderr.strip()}")
             except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
                 self.video_title = f"Error fetching title: {e}"
-                if not self.filename_provided_by_user:
-                    self.filename = f"VideoPlayback_{self.item_id}"
+                if not self.filename_provided_by_user: self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
                 self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
@@ -267,8 +249,7 @@ class DownloadItem:
                 print(f"Decoding/Timeout Error for URL {self.source_path}: {e}")
             except Exception as e:
                 self.video_title = f"Unexpected error fetching title: {e}"
-                if not self.filename_provided_by_user:
-                    self.filename = f"VideoPlayback_{self.item_id}"
+                if not self.filename_provided_by_user: self.filename = f"VideoPlayback_{self.item_id}"
                 self.is_title_fetched = False
                 self.ready_for_download = True
                 self.app_instance.master.after(0, self.app_instance._refresh_display_order)
@@ -278,38 +259,27 @@ class DownloadItem:
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _update_title_label(self):
-        """
-        Updates the title label on the UI with fetched info,
-        and sets wraplength dynamically based on column width,
-        with explicit clipping if still too long.
-        """
+        """Updates the title label on the UI with fetched info, and sets wraplength dynamically."""
         self.frame.update_idletasks()
-
-        total_frame_width = self.app_instance.downloads_canvas.winfo_width()
-        if total_frame_width == 0:
-            total_frame_width = 900
-
-        name_col_ratio = 4 / 10
-        safety_margin_px = 30
-        name_column_pixel_width = int(total_frame_width * name_col_ratio) - safety_margin_px
+        total_frame_width = self.app_instance.downloads_canvas.winfo_width() if self.app_instance.downloads_canvas.winfo_width() > 0 else 900
+        name_column_pixel_width = int(total_frame_width * 4 / 10) - 30
         name_column_pixel_width = max(10, name_column_pixel_width)
-
         self.title_label.config(wraplength=name_column_pixel_width)
 
+        display_name_raw = ""
         if "Error" in self.video_title or self.status in ['failed', 'aborted', 'cancelled']:
             display_name_raw = f"{self.status.capitalize()}: {self.video_title}"
         elif self.is_local_conversion:
-            # For local, video_title is already basename; use it directly
             display_name_raw = self.video_title
         else:
             display_name_raw = self.video_title if self.video_title and self.video_title != 'Fetching Title...' else (
                 os.path.basename(self.filename) if self.filename else f"VideoPlayback_{self.item_id}")
 
         display_name_full = f"{display_name_raw} ({self.source})"
-
         font_obj = tkinter.font.Font(family=MAIN_FONT[0], size=MAIN_FONT[1])
         text_width_px = font_obj.measure(display_name_full)
 
+        display_name_final = display_name_full
         if text_width_px > name_column_pixel_width:
             truncated_text = ""
             for i in range(len(display_name_full)):
@@ -317,22 +287,17 @@ class DownloadItem:
                 if font_obj.measure(test_text) > name_column_pixel_width:
                     truncated_text = display_name_full[:i] + "..."
                     break
-            if not truncated_text:
-                truncated_text = display_name_full
-            display_name_final = truncated_text
-        else:
-            display_name_final = display_name_full
+            if truncated_text:
+                display_name_final = truncated_text
 
         if self.title_label.winfo_exists():
             self.title_label.config(text=display_name_final)
-
         if self.date_added_label.winfo_exists():
             self.date_added_label.config(text=self.date_added)
         if self.date_completed_label.winfo_exists():
             self.date_completed_label.config(text=self.date_completed)
         if self.elapsed_time_label.winfo_exists():
-            self.elapsed_time_label.config(
-                text=self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds))
+            self.elapsed_time_label.config(text=self._format_seconds_to_dd_hh_mm_ss(self.elapsed_time_seconds))
 
     def start_download(self):
         """Starts the yt-dlp or ffmpeg process for this item in a new thread."""
@@ -355,52 +320,35 @@ class DownloadItem:
             self.elapsed_time_label.config(text=self._format_seconds_to_dd_hh_mm_ss(0))
 
         command = self._build_command()
-        # Determine if it's an ffmpeg process based on source type
         is_ffmpeg_process = (self.source == LOCAL_SOURCE)
         threading.Thread(target=self._run_conversion_process, args=(command, is_ffmpeg_process,), daemon=True).start()
 
     def _build_command(self):
         """Builds the yt-dlp or ffmpeg command for this specific item."""
-        downloads_dir = os.path.join(os.getcwd(), DOWNLOADS_DIR)
+        downloads_dir = os.path.join(os.getcwd(), self.app_instance.settings['output_directory'])  # Use settings
         temp_dir = os.path.join(downloads_dir, TEMP_SUBDIR, str(self.item_id))
         os.makedirs(temp_dir, exist_ok=True)
         out_name = self.filename
 
         if self.is_local_conversion:
-            command = ["ffmpeg", "-i", self.source_path] # Input local file
+            command = ["ffmpeg", "-i", self.source_path]
             if self.quality == "Same as source":
-                # Attempt to copy video/audio streams if compatible, otherwise re-encode with very high quality
-                command += ["-c:v", "copy", "-c:a", "copy", "-map", "0", "-y", os.path.join(temp_dir, out_name + ".mp4")]
-                # Note: 'copy' might fail if codecs are not natively supported by MP4 container.
-                # A more robust "same as source" would involve probing the source for codec and
-                # only using '-c:v copy -c:a copy' if compatible, otherwise re-encoding with a lossless/high-quality preset.
-                # For simplicity here, we assume direct copy if possible. If copy fails, FFmpeg might
-                # silently re-encode or throw an error depending on version/config.
+                command += ["-c:v", "copy", "-c:a", "copy", "-map", "0", "-y",
+                            os.path.join(temp_dir, out_name + ".mp4")]
             else:
-                crf_value = 23 # Default medium quality
+                crf_value = 23
                 if self.quality == "High Quality MP4":
-                    crf_value = 18 # Lower CRF = higher quality (visually lossless for most)
+                    crf_value = 18
                 elif self.quality == "Low Quality MP4":
-                    crf_value = 28 # Higher CRF = lower quality
-
-                command += [
-                    "-preset", "medium", # Conversion speed vs. compression efficiency
-                    "-crf", str(crf_value), # Constant Rate Factor for video quality
-                    "-c:v", "libx264", # Video codec
-                    "-c:a", "aac", # Audio codec
-                    "-b:a", "128k", # Audio bitrate
-                    "-y", # Overwrite output files without asking
-                    os.path.join(temp_dir, out_name + ".mp4") # Output to temp dir
-                ]
+                    crf_value = 28
+                command += ["-preset", "medium", "-crf", str(crf_value), "-c:v", "libx264", "-c:a", "aac", "-b:a",
+                            "128k", "-y", os.path.join(temp_dir, out_name + ".mp4")]
             self.expected_final_ext = ".mp4"
             print(f"FFmpeg Command: {' '.join(command)}")
         else:
-            # yt-dlp command for YouTube/XtremeStream
             command = [self.app_instance.yt_dlp_path, self.source_path]
-
             if self.source == XTREAM_SOURCE and self.referer:
                 command += ["--add-header", f"referer: {self.referer}"]
-
             if self.mp3_conversion:
                 command += ["--extract-audio", "--audio-format", "mp3", "--output",
                             os.path.join(temp_dir, out_name + ".mp3")]
@@ -408,7 +356,6 @@ class DownloadItem:
             else:
                 command += ["--recode-video", "mp4", "--output", os.path.join(temp_dir, out_name + ".mp4")]
                 self.expected_final_ext = ".mp4"
-
             if self.source == YOUTUBE_SOURCE:
                 if "Auto (Best available)" in self.quality:
                     command += ['-f', 'bestvideo+bestaudio/best']
@@ -423,8 +370,7 @@ class DownloadItem:
                     res = re.search(r'(\d+)p', self.quality).group(1)
                     command += ['-f', f'bestvideo[height<={res}]']
 
-            command += ["--paths", f"temp:{temp_dir}"]
-            command += ["--newline"]
+            command += ["--paths", f"temp:{temp_dir}", "--newline"]
             print(f"Yt-dlp Command: {' '.join(command)}")
         return command
 
@@ -433,91 +379,74 @@ class DownloadItem:
         rc = -1
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            self.process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                universal_newlines=True, creationflags=creationflags
-            )
+            self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                            bufsize=1, universal_newlines=True, creationflags=creationflags)
             for line in self.process.stdout:
-                if self.is_aborted:
-                    break
+                if self.is_aborted: break
                 self.output_queue.put(line)
                 if self.app_instance.log_window_visible and self.app_instance.log_text:
                     self.app_instance.master.after(0, lambda l=line: self._append_to_log(l))
-
                 if is_ffmpeg_process:
                     self._parse_ffmpeg_output_for_progress(line)
                 else:
-                    self._parse_output_for_progress(line) # For yt-dlp
-
+                    self._parse_output_for_progress(line)
                 if self.start_time:
                     elapsed = time.time() - self.start_time
                     if self.elapsed_time_label.winfo_exists() and self.elapsed_time_label.winfo_ismapped():
                         self.app_instance.master.after(0, lambda e=elapsed: self.elapsed_time_label.config(
                             text=self._format_seconds_to_dd_hh_mm_ss(e)))
-
             rc = self.process.wait()
             if self.is_merging:
-                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                    self.progress_bar.stop()
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.stop()
 
             if self.is_aborted:
-                final_status = "aborted"
-                self.update_status("aborted", COLOR_STATUS_ABORTED)
+                final_status = "aborted"; self.update_status("aborted", COLOR_STATUS_ABORTED)
             elif rc == 0:
-                final_status = "completed"
+                final_status = "completed";
                 self.update_status("completed", COLOR_STATUS_COMPLETE)
-                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                    self.progress_bar.config(value=100, mode="determinate")
-
-                temp_dir = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(self.item_id))
-                final_file_in_temp = os.path.join(temp_dir, self.filename + self.expected_final_ext)
-                final_destination = os.path.join(os.getcwd(), DOWNLOADS_DIR, self.filename + self.expected_final_ext)
-
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.config(
+                    value=100, mode="determinate")
+                downloads_dir = os.path.join(os.getcwd(),
+                                             self.app_instance.settings['output_directory'])  # Use settings
+                final_file_in_temp = os.path.join(downloads_dir, TEMP_SUBDIR, str(self.item_id),
+                                                  self.filename + self.expected_final_ext)
+                final_destination = os.path.join(downloads_dir, self.filename + self.expected_final_ext)
                 if os.path.exists(final_file_in_temp):
                     try:
-                        os.makedirs(os.path.join(os.getcwd(), DOWNLOADS_DIR), exist_ok=True)
+                        os.makedirs(downloads_dir, exist_ok=True)
                         shutil.move(final_file_in_temp, final_destination)
                         print(f"Moved final file from '{final_file_in_temp}' to '{final_destination}'")
                     except Exception as move_error:
                         print(f"Error moving final file: {move_error}")
-                        self.app_instance.master.after(0, lambda: messagebox.showwarning(
-                            "File Move Warning",
-                            f"Conversion completed but could not move final file to downloads folder:\n{move_error}\n"
-                            f"File might be in temporary folder: {final_file_in_temp}"
-                        ))
+                        self.app_instance.master.after(0, lambda: messagebox.showwarning("File Move Warning",
+                                                                                         f"Conversion completed but could not move final file to downloads folder:\n{move_error}\nFile might be in temporary folder: {final_file_in_temp}"))
                 else:
                     print(f"Final file not found in temp directory: {final_file_in_temp}")
-                    self.app_instance.master.after(0, lambda: messagebox.showwarning(
-                        "File Not Found",
-                        f"Final converted file was not found where expected in temp folder: {final_file_in_temp}"
-                    ))
-
+                    self.app_instance.master.after(0, lambda: messagebox.showwarning("File Not Found",
+                                                                                     f"Final converted file was not found where expected in temp folder: {final_file_in_temp}"))
             else:
-                final_status = "failed"
-                self.update_status("failed", COLOR_STATUS_FAILED)
-
+                final_status = "failed"; self.update_status("failed", COLOR_STATUS_FAILED)
         except FileNotFoundError:
-            final_status = "failed"
+            final_status = "failed";
             self.update_status("failed", COLOR_STATUS_FAILED)
             tool_name = "ffmpeg.exe" if is_ffmpeg_process else "yt-dlp.exe"
-            if self.app_instance.log_window_visible and self.app_instance.log_text:
-                self.app_instance.master.after(0, lambda: self._append_to_log(
-                    f"ERROR: {tool_name} not found or not in PATH.\n"))
+            if self.app_instance.log_window_visible and self.app_instance.log_text: self.app_instance.master.after(0,
+                                                                                                                   lambda: self._append_to_log(
+                                                                                                                       f"ERROR: {tool_name} not found or not in PATH.\n"))
             print(f"FileNotFoundError: {tool_name} not found or not in PATH for {self.source_path}")
         except Exception as e:
-            final_status = "failed"
+            final_status = "failed";
             self.update_status("failed", COLOR_STATUS_FAILED)
-            if self.app_instance.log_window_visible and self.app_instance.log_text:
-                self.app_instance.master.after(0, lambda: self._append_to_log(f"ERROR during execution: {e}\n"))
+            if self.app_instance.log_window_visible and self.app_instance.log_text: self.app_instance.master.after(0,
+                                                                                                                   lambda: self._append_to_log(
+                                                                                                                       f"ERROR during execution: {e}\n"))
             print(f"Error during execution for {self.source_path}: {e}")
         finally:
             self.process = None
-            if self.abort_button.winfo_exists():
-                self.abort_button.config(state="disabled")
-            temp_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR, str(self.item_id))
-            if os.path.exists(temp_path):
-                shutil.rmtree(temp_path, ignore_errors=True)
-
+            if self.abort_button.winfo_exists(): self.abort_button.config(state="disabled")
+            downloads_dir = os.path.join(os.getcwd(), self.app_instance.settings['output_directory'])  # Use settings
+            temp_path = os.path.join(downloads_dir, TEMP_SUBDIR, str(self.item_id))
+            if os.path.exists(temp_path): shutil.rmtree(temp_path, ignore_errors=True)
             self.app_instance.download_finished(self, final_status)
 
     def _append_to_log(self, text):
@@ -537,63 +466,57 @@ class DownloadItem:
             if percent_str:
                 percent = float(percent_str)
                 if self.is_merging:
-                    if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                        self.progress_bar.stop()
-                        self.progress_bar.config(mode="determinate")
+                    if hasattr(self,
+                               'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.stop(); self.progress_bar.config(
+                        mode="determinate")
                     self.is_merging = False
-
-                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                    self.progress_bar.config(value=percent)
-
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.config(
+                    value=percent)
                 speed_match = re.search(r'at\s+([0-9\.]+[KMG]?iB/s|\S+)(?:\s+ETA\s+(\d{2}:\d{2}))?', line)
                 speed = speed_match.group(1) if speed_match and speed_match.group(1) else 'N/A'
                 eta = speed_match.group(2) if speed_match and speed_match.group(2) else 'N/A'
-
                 self.update_status(f"{percent:.1f}% ({speed}, ETA {eta})", COLOR_STATUS_PROGRESS)
             return
-
         if "merging formats" in line.lower() or "ffmpeg" in line.lower() or "postprocessing" in line.lower() or "extractaudio" in line.lower():
             if not self.is_merging:
                 self.update_status("Converting/Merging...", COLOR_STATUS_PROGRESS)
-                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                    self.progress_bar.config(mode="indeterminate")
-                    self.progress_bar.start()
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.config(
+                    mode="indeterminate"); self.progress_bar.start()
                 self.is_merging = True
             return
-
         if "downloading" in line.lower() and not self.is_merging:
             self.update_status("Downloading...", COLOR_STATUS_PROGRESS)
             return
 
     def _parse_ffmpeg_output_for_progress(self, line):
         """Parses a line of FFmpeg output for progress."""
-        # Example FFmpeg output: frame= 1500 fps= 100 q=28.0 size=   12345kB time=00:00:10.00 bitrate=1000.0kbits/s speed=2.5x
         time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})', line)
         speed_match = re.search(r'speed=\s*([0-9\.]+)x', line)
-
         if time_match:
-            hours = int(time_match.group(1))
-            minutes = int(time_match.group(2))
+            hours = int(time_match.group(1));
+            minutes = int(time_match.group(2));
             seconds = int(time_match.group(3))
             current_time_seconds = hours * 3600 + minutes * 60 + seconds
-
             speed_str = f"{speed_match.group(1)}x" if speed_match else "N/A"
-            self.update_status(f"Converting... ({self._format_seconds_to_dd_hh_mm_ss(current_time_seconds)}, Speed: {speed_str})", COLOR_STATUS_PROGRESS)
-            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar['mode'] != "indeterminate":
-                 self.progress_bar.config(mode="indeterminate")
-                 self.progress_bar.start()
+            self.update_status(
+                f"Converting... ({self._format_seconds_to_dd_hh_mm_ss(current_time_seconds)}, Speed: {speed_str})",
+                COLOR_STATUS_PROGRESS)
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar[
+                'mode'] != "indeterminate":
+                self.progress_bar.config(mode="indeterminate");
+                self.progress_bar.start()
             self.is_merging = True
         elif "video:" in line or "audio:" in line and "global headers" in line:
             self.update_status("Converting...", COLOR_STATUS_PROGRESS)
-            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar['mode'] != "indeterminate":
-                self.progress_bar.config(mode="indeterminate")
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists() and self.progress_bar[
+                'mode'] != "indeterminate":
+                self.progress_bar.config(mode="indeterminate");
                 self.progress_bar.start()
             self.is_merging = True
 
     def update_status(self, text, color):
         """Updates the status label for this download item."""
-        if self.status_label.winfo_exists():
-            self.status_label.config(text=text.capitalize(), fg=color)
+        if self.status_label.winfo_exists(): self.status_label.config(text=text.capitalize(), fg=color)
         self.status = text
 
     def abort_download(self):
@@ -604,9 +527,9 @@ class DownloadItem:
                 self.process.kill()
                 self.update_status("aborted", COLOR_STATUS_ABORTED)
                 if self.is_merging:
-                    if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                        self.progress_bar.stop()
-                        self.progress_bar.config(mode="determinate")
+                    if hasattr(self,
+                               'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.stop(); self.progress_bar.config(
+                        mode="determinate")
             except Exception:
                 self.update_status("failed", COLOR_STATUS_FAILED)
         else:
@@ -615,33 +538,26 @@ class DownloadItem:
 
     def retry_download(self):
         """Resets the item and re-add it to the queue for retry."""
-        self.status = "queued"
-        self.date_completed = 'N/A'
+        self.status = "queued";
+        self.date_completed = 'N/A';
         self.elapsed_time_seconds = 0
-        self.start_time = None
-        self.is_aborted = False
+        self.start_time = None;
+        self.is_aborted = False;
         self.is_merging = False
-        self.is_active_item = True
+        self.is_active_item = True;
         self.ready_for_download = True
-
         self.app_instance.queued_downloads.insert(0, self)
-        self.app_instance._refresh_display_order()
         self.app_instance._set_status(f"Retrying download for '{self.video_title}'.", COLOR_STATUS_READY)
+        self.app_instance._refresh_display_order()  # Refresh display after adding to queue
 
     def _open_file_location(self):
         """Opens the folder containing the downloaded file and highlights the file."""
-        # Determine the expected file extension based on mp3_conversion OR if it was a local conversion (always mp4)
-        if self.is_local_conversion:
-            expected_ext = ".mp4"
-        else:
-            expected_ext = ".mp3" if self.mp3_conversion else ".mp4"
-
-        full_filepath = os.path.join(os.getcwd(), DOWNLOADS_DIR, self.filename + expected_ext)
-
+        expected_ext = ".mp4" if self.is_local_conversion else (".mp3" if self.mp3_conversion else ".mp4")
+        downloads_dir = os.path.join(os.getcwd(), self.app_instance.settings['output_directory'])  # Use settings
+        full_filepath = os.path.join(downloads_dir, self.filename + expected_ext)
         if not os.path.exists(full_filepath):
             messagebox.showerror("File Not Found", f"The file could not be found:\n{full_filepath}")
             return
-
         try:
             if sys.platform == "win32":
                 subprocess.Popen(f'explorer /select,"{full_filepath.replace("/", "\\")}"')
@@ -656,28 +572,72 @@ class DownloadItem:
 class YTDLPGUIApp:
     def __init__(self, master):
         self.master = master
+
+        # Initialize log_window and log_text early to ensure they always exist as attributes
+        self.log_window = None
+        self.log_text = None
+
+        # Load settings first
+        self.settings = self._load_settings()
+
+        # Initialize log_toggle_var and log_window_visible based on settings
+        self.log_toggle_var = tk.BooleanVar(value=self.settings['show_log_window'])
+        self.log_window_visible = self.settings['show_log_window']
+
         self._setup_window(master)
-
-        self._configure_yt_dlp_path() # Still needed for YouTube/XtremeStream
-        # FFmpeg path is assumed to be in system PATH for now
-        self._create_menus()
-
+        self._configure_yt_dlp_path()
+        self._create_menus()  # Now self.log_toggle_var and self.log_window exist when this is called
         self._create_widgets()
         self._initialize_download_management()
         self._cleanup_temp_directories_on_launch()
         self._load_downloads_from_local_history()
 
         self.master.after(100, self._process_queue_loop)
-        # Initialize UI state based on default source (YouTube)
+        # Initialize UI state based on default source (YouTube) and settings
         self.on_source_change(YOUTUBE_SOURCE)
         self.master.after_idle(self._refresh_display_order)
 
-        self.log_window = None
-        self.log_text = None
-        self.log_window_visible = False
-
-        # New instance variable for selected local file path
         self.selected_local_filepath = None
+
+    def _get_default_settings(self):
+        return {
+            "show_log_window": False,
+            "max_concurrent_downloads": DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+            "output_directory": DEFAULT_DOWNLOADS_DIR,
+            "default_youtube_quality": "Auto (Best available)",
+            "default_local_quality": "Medium Quality MP4"
+        }
+
+    def _load_settings(self):
+        settings = self._get_default_settings()
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    loaded_settings = json.load(f)
+                    # Update defaults with loaded settings, ensuring new keys are added
+                    settings.update(loaded_settings)
+            except (IOError, json.JSONDecodeError) as e:
+                print(f"Error loading settings from {CONFIG_FILE}: {e}")
+                messagebox.showwarning("Settings Load Error",
+                                       f"Could not load settings. Resetting to default. Error: {e}")
+                # Optionally, delete corrupted config file
+                if os.path.exists(CONFIG_FILE):
+                    os.remove(CONFIG_FILE)
+
+        # Ensure output directory exists based on loaded/default setting
+        full_output_path = os.path.join(os.getcwd(), settings['output_directory'])
+        os.makedirs(full_output_path, exist_ok=True)
+
+        return settings
+
+    def _save_settings(self):
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, indent=4)
+            return True
+        except IOError as e:
+            messagebox.showerror("Settings Save Error", f"Failed to save settings: {e}")
+            return False
 
     def _setup_window(self, master):
         master.title("Universal Video Downloader & Converter")
@@ -699,17 +659,158 @@ class YTDLPGUIApp:
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About Versions...", command=self._show_versions_info)
 
+        options_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Options", menu=options_menu)
+        options_menu.add_command(label="Settings", command=self._create_settings_window)
+
+        # The 'View' menu part that toggles log window
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
-        self.log_toggle_var = tk.BooleanVar(value=False)
+        # self.log_toggle_var is initialized in __init__ based on settings
         view_menu.add_checkbutton(label="Show Process Log", variable=self.log_toggle_var,
                                   command=self._toggle_log_window)
 
+        # Initial call to open log window if setting is true (moved from __init__)
+        if self.log_toggle_var.get():
+            self._toggle_log_window()
+
+    def _create_settings_window(self):
+        settings_win = tk.Toplevel(self.master)
+        settings_win.title("Settings")
+        settings_win.geometry("500x300")
+        settings_win.transient(self.master)  # Make it appear on top of the main window
+        settings_win.grab_set()  # Make it modal
+        settings_win.resizable(False, False)
+
+        settings_frame = ttk.Frame(settings_win, padding="10")
+        settings_frame.pack(fill="both", expand=True)
+        settings_frame.columnconfigure(1, weight=1)
+
+        # Variables for settings window widgets
+        max_downloads_var = tk.IntVar(value=self.settings['max_concurrent_downloads'])
+        output_dir_var = tk.StringVar(value=self.settings['output_directory'])
+        show_log_var = tk.BooleanVar(value=self.settings['show_log_window'])
+        default_youtube_quality_var = tk.StringVar(value=self.settings['default_youtube_quality'])
+        default_local_quality_var = tk.StringVar(value=self.settings['default_local_quality'])
+
+        # Max Concurrent Downloads
+        ttk.Label(settings_frame, text="Max Concurrent Downloads:").grid(row=0, column=0, sticky="w", pady=5)
+        max_downloads_spinbox = ttk.Spinbox(settings_frame, from_=1, to=5, textvariable=max_downloads_var, width=5)
+        max_downloads_spinbox.grid(row=0, column=1, sticky="w", pady=5)
+
+        # Output Directory
+        ttk.Label(settings_frame, text="Output Directory:").grid(row=1, column=0, sticky="w", pady=5)
+        output_dir_entry = ttk.Entry(settings_frame, textvariable=output_dir_var)
+        output_dir_entry.grid(row=1, column=1, sticky="ew", pady=5, padx=(0, 5))
+        ttk.Button(settings_frame, text="Browse", command=lambda: self._browse_output_directory(output_dir_var)).grid(
+            row=1, column=2, sticky="e", pady=5)
+
+        # Show Log Window by default
+        ttk.Checkbutton(settings_frame, text="Show Process Log on Startup", variable=show_log_var).grid(row=2, column=0,
+                                                                                                        columnspan=2,
+                                                                                                        sticky="w",
+                                                                                                        pady=5)
+
+        # Default YouTube Quality
+        ttk.Label(settings_frame, text="Default YouTube Quality:").grid(row=3, column=0, sticky="w", pady=5)
+        youtube_quality_options = ["Auto (Best available)", "High Quality - 1080p", "Medium Quality - 720p",
+                                   "Low Quality - 480p"]
+        youtube_quality_menu = ttk.OptionMenu(settings_frame, default_youtube_quality_var,
+                                              default_youtube_quality_var.get(), *youtube_quality_options)
+        youtube_quality_menu.grid(row=3, column=1, sticky="ew", pady=5)
+
+        # Default Local Quality
+        ttk.Label(settings_frame, text="Default Local Conversion Quality:").grid(row=4, column=0, sticky="w", pady=5)
+        local_quality_options = ["Same as source", "High Quality MP4", "Medium Quality MP4", "Low Quality MP4"]
+        local_quality_menu = ttk.OptionMenu(settings_frame, default_local_quality_var, default_local_quality_var.get(),
+                                            *local_quality_options)
+        local_quality_menu.grid(row=4, column=1, sticky="ew", pady=5)
+
+        def apply_settings():
+            try:
+                self.settings['max_concurrent_downloads'] = max_downloads_var.get()
+
+                # Validate output directory path. Use relative path if possible.
+                new_output_dir = output_dir_var.get().strip()
+                if not new_output_dir:
+                    messagebox.showwarning("Invalid Path", "Output directory cannot be empty. Reverting to default.")
+                    new_output_dir = DEFAULT_DOWNLOADS_DIR
+                    output_dir_var.set(new_output_dir)
+
+                # Ensure path is relative if it's within current working directory, otherwise keep as absolute
+                if os.path.isabs(new_output_dir):
+                    try:
+                        relative_path = os.path.relpath(new_output_dir, os.getcwd())
+                        # If relative path is shorter or dot-relative, use it
+                        if len(relative_path) < len(new_output_dir) or relative_path.startswith('.'):
+                            self.settings['output_directory'] = relative_path
+                        else:
+                            self.settings['output_directory'] = new_output_dir
+                    except ValueError:  # Occurs if paths are on different drives
+                        self.settings['output_directory'] = new_output_dir
+                else:
+                    self.settings['output_directory'] = new_output_dir
+
+                # Create the directory if it doesn't exist
+                full_path_to_create = os.path.join(os.getcwd(), self.settings['output_directory'])
+                os.makedirs(full_path_to_create, exist_ok=True)
+
+                self.settings['show_log_window'] = show_log_var.get()
+                self.settings['default_youtube_quality'] = default_youtube_quality_var.get()
+                self.settings['default_local_quality'] = default_local_quality_var.get()
+
+                # Apply log window setting immediately
+                self.log_toggle_var.set(self.settings['show_log_window'])
+                self.log_window_visible = self.settings['show_log_window']
+
+                # Ensure the log window state is updated
+                if self.log_window_visible:
+                    self._toggle_log_window()
+                else:
+                    self._on_log_window_close()
+
+                messagebox.showinfo("Settings Applied",
+                                    "Settings applied successfully. Remember to click 'Save' to make them permanent.")
+            except Exception as e:
+                messagebox.showerror("Error Applying Settings", f"An error occurred: {e}")
+
+        def save_and_close():
+            apply_settings()  # Apply current changes before saving
+            if self._save_settings():
+                settings_win.destroy()
+                # Update main window's default qualities immediately after saving
+                self.quality_var.set(self.settings['default_youtube_quality'])
+                self.local_quality_var.set(self.settings['default_local_quality'])
+                self._set_status("Settings saved and applied.", COLOR_STATUS_COMPLETE)
+            else:
+                self._set_status("Failed to save settings.", COLOR_STATUS_FAILED)
+
+        def cancel_and_close():
+            settings_win.destroy()
+
+        # Buttons
+        button_frame = ttk.Frame(settings_win)
+        button_frame.pack(side="bottom", fill="x", pady=10)
+
+        ttk.Button(button_frame, text="Apply", command=apply_settings).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Save & Close", command=save_and_close).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Cancel", command=cancel_and_close).pack(side="right", padx=5)
+
+        settings_win.protocol("WM_DELETE_WINDOW", cancel_and_close)  # Handle window close button
+        self.master.wait_window(settings_win)  # Wait for settings window to close
+
+    def _browse_output_directory(self, output_dir_var):
+        selected_dir = filedialog.askdirectory(
+            title="Select Output Directory",
+            initialdir=os.path.join(os.getcwd(), output_dir_var.get())  # Use current setting as initial
+        )
+        if selected_dir:
+            output_dir_var.set(selected_dir)
+
     def _show_versions_info(self):
         """Displays yt-dlp and ffmpeg version information."""
-        yt_dlp_version = "Not Found"
+        yt_dlp_version = "Not Found";
         ffmpeg_version = "Not Found"
-
         try:
             yt_dlp_result = subprocess.run([self.yt_dlp_path, "--version"], capture_output=True, text=True, check=True,
                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
@@ -717,59 +818,52 @@ class YTDLPGUIApp:
             yt_dlp_version = yt_dlp_result.stdout.strip()
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             pass
-
         try:
             ffmpeg_result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True,
                                            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
                                            timeout=5)
             ffmpeg_version_lines = ffmpeg_result.stdout.strip().split('\n')
-            if ffmpeg_version_lines:
-                ffmpeg_version = ffmpeg_version_lines[0]
+            if ffmpeg_version_lines: ffmpeg_version = ffmpeg_version_lines[0]
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             pass
-
-        messagebox.showinfo(
-            "About Versions",
-            f"yt-dlp Version: {yt_dlp_version}\n"
-            f"FFmpeg Version: {ffmpeg_version}\n\n"
-            "This application uses yt-dlp for downloading and FFmpeg for media processing."
-        )
+        messagebox.showinfo("About Versions",
+                            f"yt-dlp Version: {yt_dlp_version}\nFFmpeg Version: {ffmpeg_version}\n\nThis application uses yt-dlp for downloading and FFmpeg for media processing.")
 
     def _toggle_log_window(self):
         """Toggles the visibility of the process log window."""
         self.log_window_visible = self.log_toggle_var.get()
-
         if self.log_window_visible:
             if not self.log_window or not self.log_window.winfo_exists():
                 self.log_window = tk.Toplevel(self.master)
                 self.log_window.title("Process Log")
                 self.log_window.geometry("600x400")
                 self.log_window.protocol("WM_DELETE_WINDOW", self._on_log_window_close)
-
                 self.log_text = scrolledtext.ScrolledText(self.log_window, wrap=tk.WORD, font=MONO_FONT, bg="black",
                                                           fg="lightgreen", insertbackground="white")
                 self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
                 self.log_text.config(state=tk.DISABLED)
             self.log_window.deiconify()
         else:
-            if self.log_window and self.log_window.winfo_exists():
-                self.log_window.withdraw()
+            if self.log_window and self.log_window.winfo_exists(): self.log_window.withdraw()
 
     def _on_log_window_close(self):
         """Handles the log window close button, updating the toggle variable."""
         self.log_toggle_var.set(False)
         self.log_window_visible = False
-        if self.log_window:
-            self.log_window.withdraw()
+        if self.log_window: self.log_window.withdraw()
 
     def _open_downloads_folder(self):
         """Opens the main downloads directory."""
-        downloads_path = os.path.join(os.getcwd(), DOWNLOADS_DIR)
-        if not os.path.exists(downloads_path):
-            os.makedirs(downloads_path, exist_ok=True)
-
+        downloads_path = os.path.join(os.getcwd(), self.settings['output_directory'])  # Use setting
+        if not os.path.exists(downloads_path): os.makedirs(downloads_path, exist_ok=True)
         try:
-            os.startfile(downloads_path)
+            # On Windows, os.startfile opens the folder. On macOS/Linux, xdg-open/open.
+            if sys.platform == "win32":
+                os.startfile(downloads_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", downloads_path])
+            else:
+                subprocess.Popen(["xdg-open", downloads_path])
         except Exception as e:
             messagebox.showerror("Error", f"Could not open downloads folder: {e}")
 
@@ -778,67 +872,67 @@ class YTDLPGUIApp:
         self.main_frame.pack(fill="both", expand=True)
         self.main_frame.grid_columnconfigure(1, weight=1)
 
-        input_frame = tk.LabelFrame(self.main_frame, text="Add New Download/Conversion", font=MAIN_FONT, padx=10, pady=10)
+        input_frame = tk.LabelFrame(self.main_frame, text="Add New Download/Conversion", font=MAIN_FONT, padx=10,
+                                    pady=10)
         input_frame.pack(fill="x", pady=5)
-        input_frame.grid_columnconfigure(1, weight=1)
+        input_frame.columnconfigure(1, weight=1)
 
-        row_idx = 0
-        tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=row_idx, column=0, sticky="w", padx=5, pady=2)
+        # Source Selection (Row 0)
+        tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.source_var = tk.StringVar(value=YOUTUBE_SOURCE)
         self.source_menu = tk.OptionMenu(input_frame, self.source_var, YOUTUBE_SOURCE, XTREAM_SOURCE, LOCAL_SOURCE,
                                          command=self.on_source_change)
-        self.source_menu.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
+        self.source_menu.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+        self.master.update_idletasks()  # Force update after gridding OptionMenu
 
-        row_idx += 1
-        self.referer_label = tk.Label(input_frame, text="Referer URL:", font=MAIN_FONT)
-        self.referer_entry = tk.Entry(input_frame, font=MAIN_FONT)
+        # Dynamic Input Fields Container (Rows 1 onwards)
+        self.dynamic_input_container = tk.Frame(input_frame)
+        self.dynamic_input_container.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.dynamic_input_container.columnconfigure(1, weight=1)
 
-        row_idx += 1
-        # Target URL widgets (YouTube/XtremeStream)
-        self.url_label = tk.Label(input_frame, text="Target URL:", font=MAIN_FONT)
-        self.url_entry = tk.Entry(input_frame, font=MAIN_FONT)
+        # Common input widgets (initialized but not gridded directly, will be placed in dynamic_input_container)
+        self.url_label = tk.Label(self.dynamic_input_container, text="Target URL:", font=MAIN_FONT)
+        self.url_entry = tk.Entry(self.dynamic_input_container, font=MAIN_FONT)
+        self.referer_label = tk.Label(self.dynamic_input_container, text="Referer URL:", font=MAIN_FONT)
+        self.referer_entry = tk.Entry(self.dynamic_input_container, font=MAIN_FONT)
+        self.local_filepath_label = tk.Label(self.dynamic_input_container, text="No file selected", font=MAIN_FONT,
+                                             anchor="w", wraplength=400)
+        self.browse_file_button = tk.Button(self.dynamic_input_container, text="Browse Local File",
+                                            command=self._browse_local_file, bg=COLOR_BROWSE_FILE_BUTTON, fg="white",
+                                            font=SMALL_FONT, width=15)
 
-        # Local File Widgets (for Local Source)
-        self.local_filepath_label = tk.Label(input_frame, text="No file selected", font=MAIN_FONT, anchor="w", wraplength=400)
-        self.browse_file_button = tk.Button(input_frame, text="Browse Local File", command=self._browse_local_file,
-                                            bg=COLOR_BROWSE_FILE_BUTTON, fg="white", font=SMALL_FONT, width=15)
+        # Initialize quality_var with default setting
+        self.quality_var = tk.StringVar(value=self.settings['default_youtube_quality'])
+        self.quality_label = tk.Label(self.dynamic_input_container, text="Quality:", font=MAIN_FONT)
+        self.quality_menu = tk.OptionMenu(self.dynamic_input_container, self.quality_var,
+                                          "Auto (Best available)")  # Options will be updated by _update_quality_options_grouped
 
+        # Initialize local_quality_var with default setting
+        self.local_quality_var = tk.StringVar(value=self.settings['default_local_quality'])
+        self.local_quality_label = tk.Label(self.dynamic_input_container, text="Output Quality:", font=MAIN_FONT)
+        self.local_quality_menu = tk.OptionMenu(self.dynamic_input_container, self.local_quality_var, "Same as source",
+                                                "High Quality MP4", "Medium Quality MP4", "Low Quality MP4")
 
-        self.QUALITY_ROW_IDX = row_idx + 1 # Dynamic row index for quality options
-
-        # YouTube/XtremeStream Quality
-        self.quality_label = tk.Label(input_frame, text="Quality:", font=MAIN_FONT)
-        self.quality_var = tk.StringVar(value="Auto (Best available)")
-        self.quality_menu = tk.OptionMenu(input_frame, self.quality_var, "Auto (Best available)")
-
-        # Local Quality
-        self.local_quality_label = tk.Label(input_frame, text="Output Quality:", font=MAIN_FONT)
-        self.local_quality_var = tk.StringVar(value="Medium Quality MP4")
-        self.local_quality_menu = tk.OptionMenu(input_frame, self.local_quality_var,
-                                                 "Same as source", # New option, re-added
-                                                 "High Quality MP4", "Medium Quality MP4", "Low Quality MP4")
-
-
-        row_idx = self.QUALITY_ROW_IDX + 1
-        tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT).grid(row=row_idx, column=0,
-                                                                                       sticky="w", padx=5, pady=2)
+        # Output Filename (common for all sources, placed below dynamic inputs)
+        tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT).grid(row=2, column=0, sticky="w",
+                                                                                       padx=5, pady=2)
         self.filename_entry = tk.Entry(input_frame, font=MAIN_FONT)
-        self.filename_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=2)
+        self.filename_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=2)
 
-        row_idx += 1
+        # MP3 Conversion (common for online sources, placed below filename)
         self.mp3_var = tk.BooleanVar()
-        self.mp3_check = tk.Checkbutton(input_frame, text="Convert to MP3 (for online sources)", variable=self.mp3_var, font=MAIN_FONT)
-        self.mp3_check.grid(row=row_idx, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        self.mp3_check = tk.Checkbutton(input_frame, text="Convert to MP3 (for online sources)", variable=self.mp3_var,
+                                        font=MAIN_FONT)
+        self.mp3_check.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
-        row_idx += 1
+        # Add to Queue Button (Fixed position at the bottom of input_frame)
         self.add_to_queue_button = tk.Button(input_frame, text="Add to Queue", command=self._add_current_to_queue,
                                              bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT)
-        self.add_to_queue_button.grid(row=row_idx, column=0, columnspan=2, sticky="ew", pady=10)
+        self.add_to_queue_button.grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
 
         # Bind events
         self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
         self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
-
 
         control_buttons_frame = tk.Frame(self.main_frame)
         control_buttons_frame.pack(fill="x", pady=5)
@@ -853,8 +947,8 @@ class YTDLPGUIApp:
         self.open_downloads_button.pack(side="left", expand=True, fill="x", padx=2)
 
         self.clear_history_button = tk.Button(control_buttons_frame, text="Clear History",
-                                              command=self._clear_finished_history, bg=COLOR_CLEAR_BUTTON,
-                                              fg="black", font=BOLD_FONT)
+                                              command=self._clear_finished_history, bg=COLOR_CLEAR_BUTTON, fg="black",
+                                              font=BOLD_FONT)
         self.clear_history_button.pack(side="left", expand=True, fill="x", padx=2)
 
         self.display_area_frame = tk.Frame(self.main_frame)
@@ -918,40 +1012,28 @@ class YTDLPGUIApp:
 
     def on_source_change(self, value):
         """Adjusts UI based on selected source (YouTube, XtremeStream, or Local)."""
-        # Hide all source-specific widgets first
-        self.referer_label.grid_forget()
-        self.referer_entry.grid_forget()
-        self.url_label.grid_forget()
-        self.url_entry.grid_forget()
-        self.quality_label.grid_forget()
-        self.quality_menu.grid_forget()
-        self.local_filepath_label.grid_forget()
-        self.browse_file_button.grid_forget()
-        self.local_quality_label.grid_forget()
-        self.local_quality_menu.grid_forget()
-        self.mp3_check.grid_forget() # Hide MP3 checkbox, re-grid if applicable
+        # Clear previous dynamic inputs in the container
+        for widget in self.dynamic_input_container.winfo_children():
+            widget.grid_forget()
 
-        current_row_idx = self.source_menu.grid_info()["row"] + 1
+        current_row_idx = 0  # Start from row 0 within the dynamic_input_container
 
         if value == YOUTUBE_SOURCE:
             self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             current_row_idx += 1
             self._update_quality_options_grouped(
-                [("Auto (Best available)", "Auto (Best available)")],
-                [],
-                [],
-                [],
-                [("1080", "High Quality - 1080p")],
-                [("720", "Medium Quality - 720p")],
-                [("480", "Low Quality - 480p")]
+                [("Auto (Best available)", "Auto (Best available)")], [], [], [],
+                [("1080", "High Quality - 1080p")], [("720", "Medium Quality - 720p")], [("480", "Low Quality - 480p")]
             )
             self.quality_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.quality_menu.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
             self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
-            self.mp3_check.grid(row=current_row_idx + 1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
-            self.mp3_check.config(state="normal") # Enable MP3 option for YouTube
+            self.mp3_check.config(state="normal")
+            # Set default quality from settings
+            self.quality_var.set(self.settings['default_youtube_quality'])
+
 
         elif value == XTREAM_SOURCE:
             self.referer_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
@@ -959,68 +1041,67 @@ class YTDLPGUIApp:
             current_row_idx += 1
             self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            self._update_quality_options_grouped([("Auto (Best available)", "Auto (Best available)")], [], [], [], [],
+                                                 [], [])
+            self.quality_label.grid(row=current_row_idx + 1, column=0, sticky="w", padx=5, pady=2)
+            self.quality_menu.grid(row=current_row_idx + 1, column=1, sticky="ew", padx=5, pady=2)
             self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
-            self.url_entry.bind("<FocusOut>", self._on_url_focus_out) # Keep focus out for XtremeStream too
-            self.mp3_check.grid(row=current_row_idx + 1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
-            self.mp3_check.config(state="normal") # Enable MP3 option for XtremeStream
+            self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
+            self.mp3_check.config(state="normal")
+            # Set default quality from settings (it's "Auto" for XtremeStream anyway)
+            self.quality_var.set(self.settings['default_youtube_quality'])
+
 
         elif value == LOCAL_SOURCE:
-            # Unbind previous URL-related events
             self.url_entry.unbind("<Return>")
             self.url_entry.unbind("<FocusOut>")
 
-            self.local_filepath_label.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             self.browse_file_button.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.local_filepath_label.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             current_row_idx += 1
             self.local_quality_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.local_quality_menu.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
-            # Disable MP3 conversion checkbox for local (always MP4)
-            self.mp3_check.grid(row=current_row_idx + 1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
             self.mp3_check.config(state="disabled")
-            self.mp3_var.set(False) # Ensure it's unchecked for local conversions
-            # Clear url and filename entries when switching to local
-            self.url_entry.delete(0, END)
-            self.filename_entry.delete(0, END)
-            self.local_filepath_label.config(text="No file selected")
-            self.selected_local_filepath = None # Reset selected file
-            self.filename_entry.delete(0,END) # Clear filename suggestion
+            self.mp3_var.set(False)
+            # Set default quality from settings
+            self.local_quality_var.set(self.settings['default_local_quality'])
 
+        # Always ensure common input fields are cleared/reset when source changes
+        self.url_entry.delete(0, END)
+        self.referer_entry.delete(0, END)
+        self.local_filepath_label.config(text="No file selected")
+        self.selected_local_filepath = None
+        self.filename_entry.delete(0, END)  # Clear filename entry explicitly
 
-        # Adjust the "Add to Queue" button's position
-        # Get the row of the mp3_check, or the last shown widget if mp3_check is hidden.
-        # Ensure 'current_row_idx' correctly reflects the last used row for placing the button.
-        final_input_row = max(
-            self.filename_entry.grid_info()["row"] if self.filename_entry.winfo_ismapped() else -1,
-            self.mp3_check.grid_info()["row"] if self.mp3_check.winfo_ismapped() else -1,
-            self.quality_menu.grid_info()["row"] if self.quality_menu.winfo_ismapped() else -1,
-            self.local_quality_menu.grid_info()["row"] if self.local_quality_menu.winfo_ismapped() else -1,
-            self.url_entry.grid_info()["row"] if self.url_entry.winfo_ismapped() else -1,
-            self.referer_entry.grid_info()["row"] if self.referer_entry.winfo_ismapped() else -1,
-            self.browse_file_button.grid_info()["row"] if self.browse_file_button.winfo_ismapped() else -1
-        )
-        self.add_to_queue_button.grid(row=final_input_row + 1, column=0, columnspan=2, sticky="ew", pady=10)
+        self.url_entry.focus_set()  # Set focus back to URL entry for convenience
 
+        # Update the overall frame sizing after dynamic widget changes
+        self.dynamic_input_container.update_idletasks()
+        self.master.update_idletasks()
 
     def _set_status(self, text, color="black"):
         """Updates the main status bar."""
         self.status_bar.config(text=text, fg=color)
 
+    def _browse_output_directory(self, output_dir_var):
+        selected_dir = filedialog.askdirectory(
+            title="Select Output Directory",
+            initialdir=os.path.join(os.getcwd(), output_dir_var.get())  # Use current setting as initial
+        )
+        if selected_dir:
+            output_dir_var.set(selected_dir)
+
     def _browse_local_file(self):
         """Opens a file dialog to select a local video file for conversion."""
         filepath = filedialog.askopenfilename(
             title="Select Video File",
-            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.flv *.wmv *.webm"),
-                       ("All files", "*.*")]
+            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.flv *.wmv *.webm"), ("All files", "*.*")]
         )
         if filepath:
             self.selected_local_filepath = filepath
-            # Update label to show selected path, truncate if too long
             display_path = filepath
-            if len(display_path) > 50: # Arbitrary length for truncation
-                display_path = "..." + display_path[-47:]
+            if len(display_path) > 50: display_path = "..." + display_path[-47:]
             self.local_filepath_label.config(text=display_path)
-
-            # Suggest filename without extension
             self.filename_entry.delete(0, END)
             self.filename_entry.insert(0, os.path.splitext(os.path.basename(filepath))[0])
         else:
@@ -1028,57 +1109,40 @@ class YTDLPGUIApp:
             self.local_filepath_label.config(text="No file selected")
             self.filename_entry.delete(0, END)
 
-
     def _add_current_to_queue(self):
         """Adds the current input values as a new download/conversion item to the queue."""
         source = self.source_var.get()
-        item_data = {}
-        source_path = ""
-        quality = "N/A"
-        filename_provided_by_user = bool(self.filename_entry.get().strip())
+        source_path = "";
+        quality = "N/A";
         filename_for_item_data = self.filename_entry.get().strip()
-        mp3_conversion = False # Default
+        filename_provided_by_user = bool(filename_for_item_data)
+        mp3_conversion = self.mp3_var.get()
+        referer = ""
+        video_title = 'Fetching Title...'
 
         if source == LOCAL_SOURCE:
             source_path = self.selected_local_filepath
-            if not source_path or not os.path.exists(source_path):
-                messagebox.showwarning("Input Error", "Please select a local video file.")
-                return
+            if not source_path or not os.path.exists(source_path): messagebox.showwarning("Input Error",
+                                                                                          "Please select a local video file."); return
             quality = self.local_quality_var.get()
-            # For local conversion, force mp3_conversion to False (always MP4 output)
             mp3_conversion = False
-            if not filename_for_item_data:
-                filename_for_item_data = os.path.splitext(os.path.basename(source_path))[0] # Use base filename
-            video_title = os.path.basename(source_path) # Title for display will be the filename
-
-        else: # YouTube or XtremeStream
+            if not filename_for_item_data: filename_for_item_data = os.path.splitext(os.path.basename(source_path))[0]
+            video_title = os.path.basename(source_path)
+        else:
             source_path = self.url_entry.get().strip()
-            if not source_path:
-                messagebox.showwarning("Input Error", "Target URL is required.")
-                return
-            if not (source_path.startswith("http://") or source_path.startswith("https://")):
-                messagebox.showwarning("Input Error", "Invalid URL. Must start with http:// or https://")
-                return
+            if not source_path: messagebox.showwarning("Input Error", "Target URL is required."); return
+            if not (source_path.startswith("http://") or source_path.startswith("https://")): messagebox.showwarning(
+                "Input Error", "Invalid URL. Must start with http:// or https://"); return
             quality = self.quality_var.get()
-            mp3_conversion = self.mp3_var.get()
-            video_title = 'Fetching Title...' # Will be updated by fetch_title_async
-
-        referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
+            referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
 
         self.download_item_counter += 1
         item_id = self.download_item_counter
 
         item_data = {
-            'id': item_id,
-            'source_path': source_path, # Generic field for URL or File Path
-            'quality': quality,
-            'filename': filename_for_item_data,
-            'mp3_conversion': mp3_conversion,
-            'source': source,
-            'referer': referer,
-            'video_title': video_title,
-            'status': 'queued',
-            'date_added': time.strftime("%m/%d/%y"),
+            'id': item_id, 'source_path': source_path, 'quality': quality, 'filename': filename_for_item_data,
+            'mp3_conversion': mp3_conversion, 'source': source, 'referer': referer, 'video_title': video_title,
+            'status': 'queued', 'date_added': time.strftime("%m/%d/%y"),
             'filename_provided_by_user': filename_provided_by_user,
             'elapsed_time_seconds': 0
         }
@@ -1090,51 +1154,37 @@ class YTDLPGUIApp:
         self._refresh_display_order()
         self._set_status(f"Added '{source_path}' to queue.", COLOR_STATUS_READY)
 
-        # Clear input fields
-        self.url_entry.delete(0, END)
-        self.filename_entry.delete(0, END)
+        self.url_entry.delete(0, END);
+        self.filename_entry.delete(0, END);
         self.mp3_var.set(False)
-        self.referer_entry.delete(0, END)
-        self.local_filepath_label.config(text="No file selected")
+        self.referer_entry.delete(0, END);
+        self.local_filepath_label.config(text="No file selected");
         self.selected_local_filepath = None
         self.url_entry.focus_set()
         self.alert_on_completion_for_session = True
 
-
     def _add_to_queue_on_enter(self, event=None):
         """Handles adding to queue when Enter is pressed in URL entry."""
-        # Only process if current source is not Local
-        if self.source_var.get() != LOCAL_SOURCE:
-            self._add_current_to_queue()
+        if self.source_var.get() != LOCAL_SOURCE: self._add_current_to_queue()
 
     def _on_url_focus_out(self, event=None):
-        """
-        Attempts to pre-fill filename based on URL if not provided by user and source is YouTube/XtremeStream.
-        """
-        if self.source_var.get() == LOCAL_SOURCE:
-            return # Do not pre-fill for local source
-
+        """Attempts to pre-fill filename based on URL if not provided by user and source is YouTube/XtremeStream."""
+        if self.source_var.get() == LOCAL_SOURCE: return
         url = self.url_entry.get().strip()
         if url and not self.filename_entry.get().strip():
             temp_item_data = {
-                'id': -1,
-                'source_path': url,
-                'quality': self.quality_var.get(),
-                'filename': '',
-                'mp3_conversion': self.mp3_var.get(),
-                'source': self.source_var.get(),
+                'id': -1, 'source_path': url, 'quality': self.quality_var.get(), 'filename': '',
+                'mp3_conversion': self.mp3_var.get(), 'source': self.source_var.get(),
                 'referer': self.referer_entry.get().strip(),
-                'video_title': 'Fetching Title...',
-                'status': 'temp_fetching',
-                'date_added': 'N/A',
-                'filename_provided_by_user': False,
-                'elapsed_time_seconds': 0
+                'video_title': 'Fetching Title...', 'status': 'temp_fetching', 'date_added': 'N/A',
+                'filename_provided_by_user': False, 'elapsed_time_seconds': 0
             }
             temp_item = DownloadItem(self, temp_item_data, is_active_item=True)
 
             def _update_filename_after_fetch():
                 if not self.filename_entry.get().strip():
-                    if temp_item.is_title_fetched and temp_item.video_title not in ['Unknown Title', 'Fetching Title...']:
+                    if temp_item.is_title_fetched and temp_item.video_title not in ['Unknown Title',
+                                                                                    'Fetching Title...']:
                         sanitized_title = re.sub(r'[\\/:*?"<>|]', '', temp_item.video_title)
                         self.filename_entry.delete(0, END)
                         preview_filename = sanitized_title[:60] if len(sanitized_title) > 60 else sanitized_title
@@ -1150,46 +1200,40 @@ class YTDLPGUIApp:
     def _update_quality_options_grouped(self, auto, combined_video_audio, combined_audio_only, video_only,
                                         high_quality_video, medium_quality_video, low_quality_video):
         """Updates the quality OptionMenu with new options based on source."""
-        menu = self.quality_menu["menu"]
+        menu = self.quality_menu["menu"];
         menu.delete(0, "end")
 
         def add_command(value):
             menu.add_command(label=value, command=tk._setit(self.quality_var, value))
 
         if auto:
-            for text, val in auto:
-                add_command(text)
+            for text, val in auto: add_command(text)
             menu.add_separator()
         if combined_video_audio:
             menu.add_command(label="--- Combined Video + Audio ---", state="disabled")
-            for res, text in combined_video_audio:
-                add_command(f"{text} - {res}p")
+            for res, text in combined_video_audio: add_command(f"{text} - {res}p")
             menu.add_separator()
         if combined_audio_only:
             menu.add_command(label="--- Combined Audio Only ---", state="disabled")
-            for res, text in combined_audio_only:
-                add_command(f"{text} - {res}p")
+            for res, text in combined_audio_only: add_command(f"{text} - {res}p")
             menu.add_separator()
         if video_only:
             menu.add_command(label="--- Video Only ---", state="disabled")
-            for res, text in video_only:
-                add_command(f"{text}")
+            for res, text in video_only: add_command(f"{text}")
             menu.add_separator()
         if high_quality_video:
             menu.add_command(label="--- High Quality Video ---", state="disabled")
-            for res, text in high_quality_video:
-                add_command(f"{text}")
+            for res, text in high_quality_video: add_command(f"{text}")
             menu.add_separator()
         if medium_quality_video:
             menu.add_command(label="--- Medium Quality Video ---", state="disabled")
-            for res, text in medium_quality_video:
-                add_command(f"{text}")
+            for res, text in medium_quality_video: add_command(f"{text}")
             menu.add_separator()
         if low_quality_video:
             menu.add_command(label="--- Low Quality Video ---", state="disabled")
-            for res, text in low_quality_video:
-                add_command(f"{text}")
+            for res, text in low_quality_video: add_command(f"{text}")
 
+        # Ensure the selected value is still in the list of options, otherwise reset to default
         if self.quality_var.get() not in [item[0] for item in
                                           auto + combined_video_audio + combined_audio_only + video_only + high_quality_video + medium_quality_video + low_quality_video]:
             if auto:
@@ -1200,48 +1244,43 @@ class YTDLPGUIApp:
     def _process_queue_loop(self):
         """Manages the download queue, starting new downloads as slots become free."""
         active_count = len(self.active_downloads)
+        # Use max_concurrent_downloads from settings
+        max_concurrent = self.settings['max_concurrent_downloads']
 
         next_item_to_start = None
         for i, item in enumerate(self.queued_downloads):
             if item.ready_for_download:
-                next_item_to_start = self.queued_downloads.pop(i)
+                next_item_to_start = self.queued_downloads.pop(i);
                 break
-
-        if next_item_to_start and active_count < MAX_CONCURRENT_DOWNLOADS:
+        if next_item_to_start and active_count < max_concurrent:  # Use max_concurrent
             self.active_downloads.append(next_item_to_start)
-            self._set_status(f"Starting {next_item_to_start.source} for {next_item_to_start.video_title}...", COLOR_STATUS_PROGRESS)
+            self._set_status(f"Starting {next_item_to_start.source} for {next_item_to_start.video_title}...",
+                             COLOR_STATUS_PROGRESS)
             next_item_to_start.start_download()
             self.is_queue_processing_active = True
             self.all_downloads_completed.clear()
         elif not self.active_downloads and not self.queued_downloads and self.is_queue_processing_active:
             self.is_queue_processing_active = False
             self.all_downloads_completed.set()
-
             if self.alert_on_completion_for_session and self.total_downloads_added > 0:
-                messagebox.showinfo("Tasks Complete",
-                                    f"All {self.completed_downloads_count} tasks finished!")
-                self.alert_on_completion_for_session = False
-                self.completed_downloads_count = 0
+                messagebox.showinfo("Tasks Complete", f"All {self.completed_downloads_count} tasks finished!")
+                self.alert_on_completion_for_session = False;
+                self.completed_downloads_count = 0;
                 self.total_downloads_added = 0
             self._set_status("All tasks finished. Ready.", COLOR_STATUS_COMPLETE)
         self.master.after(1000, self._process_queue_loop)
 
     def download_finished(self, item, final_status):
         """Called by a DownloadItem when its process completes (success/fail/abort)."""
-        if item in self.active_downloads:
-            self.active_downloads.remove(item)
-
+        if item in self.active_downloads: self.active_downloads.remove(item)
         item.status = final_status
         item.date_completed = time.strftime("%m/%d/%y")
         if item.start_time:
             item.elapsed_time_seconds = int(time.time() - item.start_time)
         else:
             item.elapsed_time_seconds = 0
-
         item.is_active_item = False
-
         self._save_downloads_to_local_history()
-
         if final_status == "completed":
             self.completed_downloads_count += 1
             self._set_status(f"Task for '{item.video_title}' completed!", COLOR_STATUS_COMPLETE)
@@ -1249,97 +1288,79 @@ class YTDLPGUIApp:
             self._set_status(f"Task for '{item.video_title}' aborted.", COLOR_STATUS_ABORTED)
         else:
             self._set_status(f"Task for '{item.video_title}' failed.", COLOR_STATUS_FAILED)
-
         self._refresh_display_order()
 
     def remove_from_queue(self, item_to_remove):
         """Removes a specified item from the queued_downloads list."""
         if item_to_remove in self.queued_downloads:
-            self.queued_downloads.remove(item_to_remove)
+            self.queued_downloads.remove(item_to_remove);
             self.download_items_map.pop(item_to_remove.item_id, None)
-            self._refresh_display_order()
+            self._refresh_display_order();
             self._set_status(f"Removed '{item_to_remove.video_title}' from queue.", COLOR_STATUS_READY)
 
     def _clear_queue(self):
         """Clears all items from the active and queued downloads."""
-        for item in self.active_downloads[:]:
-            item.abort_download()
-        self.queued_downloads.clear()
+        for item in self.active_downloads[:]: item.abort_download()
+        self.queued_downloads.clear();
         self.active_downloads.clear()
-
         ids_to_remove = [item.item_id for item in self.download_items_map.values() if item.is_active_item]
-        for item_id in ids_to_remove:
-            self.download_items_map.pop(item_id, None)
-
-        self._refresh_display_order()
+        for item_id in ids_to_remove: self.download_items_map.pop(item_id, None)
+        self._refresh_display_order();
         self._set_status("Task queue cleared.", COLOR_STATUS_READY)
         messagebox.showinfo("Queue Cleared", "All pending tasks have been cleared.")
 
     def _clear_finished_history(self):
         """Clears all items from the finished tasks history."""
-        if messagebox.askyesno("Clear History", "Are you sure you want to clear all task history? "
-                                                "This will not delete the actual converted/downloaded files."):
+        if messagebox.askyesno("Clear History",
+                               "Are you sure you want to clear all task history? This will not delete the actual converted/downloaded files."):
             ids_to_remove = [item.item_id for item in self.download_items_map.values() if not item.is_active_item]
-            for item_id in ids_to_remove:
-                self.download_items_map.pop(item_id, None)
-
-            self._save_downloads_to_local_history()
-            self._refresh_display_order()
+            for item_id in ids_to_remove: self.download_items_map.pop(item_id, None)
+            self._save_downloads_to_local_history();
+            self._refresh_display_order();
             self._set_status("Task history cleared.", COLOR_STATUS_READY)
 
     def _refresh_display_order(self):
-        """
-        Destroys and recreates all download item frames to ensure correct order
-        and visibility (active vs. history).
-        """
-        self.downloads_canvas.update_idletasks()
+        """Destroys and recreates all download item frames to ensure correct order and visibility (active vs. history)."""
+        self.downloads_canvas.update_idletasks();
         self.downloads_frame_inner.update_idletasks()
+        for widget in self.downloads_frame_inner.winfo_children(): widget.destroy()
 
-        for widget in self.downloads_frame_inner.winfo_children():
-            widget.destroy()
-
-        header_frame = tk.Frame(self.downloads_frame_inner, bg="#e0e0e0")
+        header_frame = tk.Frame(self.downloads_frame_inner, bg="#e0e0e0");
         header_frame.pack(fill="x", padx=5, pady=(0, 2))
-        columns = [
-            ("Name", 0),
-            ("Status", 1),
-            ("Date Added", 2),
-            ("Date Completed", 3),
-            ("Time / ETA", 4),
-            ("Action", 5)
-        ]
-        header_frame.columnconfigure(0, weight=4)
-        header_frame.columnconfigure(1, weight=2)
+        columns = [("Name", 0), ("Status", 1), ("Date Added", 2), ("Date Completed", 3), ("Time / ETA", 4),
+                   ("Action", 5)]
+        header_frame.columnconfigure(0, weight=4);
+        header_frame.columnconfigure(1, weight=2);
         header_frame.columnconfigure(2, weight=1)
-        header_frame.columnconfigure(3, weight=1)
-        header_frame.columnconfigure(4, weight=1)
+        header_frame.columnconfigure(3, weight=1);
+        header_frame.columnconfigure(4, weight=1);
         header_frame.columnconfigure(5, weight=1)
 
         for col_name, col_idx in columns:
             lbl = tk.Label(header_frame, text=col_name, font=BOLD_FONT, bg="#e0e0e0", borderwidth=1, relief="ridge")
-            lbl.grid(row=0, column=col_idx, sticky="ew", padx=1, pady=0)
+            lbl.grid(row=0, column=col_idx, sticky="ew", padx=1, pady=0);
             lbl.bind("<Button-1>", lambda e, idx=col_idx: self._on_header_click(idx))
 
-        sort_col = getattr(self, '_current_sort_col', 2)
+        sort_col = getattr(self, '_current_sort_col', 2);
         sort_reverse = getattr(self, '_current_sort_reverse', True)
         all_display_items = list(self.download_items_map.values())
 
         def sort_key(item):
-            if sort_col == 0:  # Name
+            if sort_col == 0:
                 return (item.video_title or item.filename or "").lower()
-            elif sort_col == 1:  # Status
+            elif sort_col == 1:
                 return item.status.lower()
-            elif sort_col == 2:  # Date Added
+            elif sort_col == 2:
                 try:
                     return time.mktime(time.strptime(item.date_added, "%m/%d/%y"))
                 except Exception:
                     return 0
-            elif sort_col == 3:  # Date Completed
+            elif sort_col == 3:
                 try:
                     return time.mktime(time.strptime(item.date_completed, "%m/%d/%y"))
                 except Exception:
                     return 0
-            elif sort_col == 4:  # Time/ETA (elapsed time)
+            elif sort_col == 4:
                 return item.elapsed_time_seconds
             else:
                 return 0
@@ -1347,55 +1368,42 @@ class YTDLPGUIApp:
         all_display_items.sort(key=sort_key, reverse=sort_reverse)
 
         for item_obj in all_display_items:
-            item_obj.parent_frame = self.downloads_frame_inner
+            item_obj.parent_frame = self.downloads_frame_inner;
             item_obj._build_frame_widgets()
-            item_obj.frame.pack(fill="x", padx=5, pady=3)
+            item_obj.frame.pack(fill="x", padx=5, pady=3);
             item_obj._update_title_label()
             item_obj.update_status(item_obj.status, item_obj._get_status_color(item_obj.status))
-
-        self.downloads_frame_inner.update_idletasks()
+        self.downloads_frame_inner.update_idletasks();
         self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all"))
 
     def _on_header_click(self, col_idx):
         """Handles sorting when a header is clicked."""
-        prev_col = getattr(self, '_current_sort_col', 2)
+        prev_col = getattr(self, '_current_sort_col', 2);
         prev_rev = getattr(self, '_current_sort_reverse', True)
         if prev_col == col_idx:
             self._current_sort_reverse = not prev_rev
         else:
-            self._current_sort_col = col_idx
-            self._current_sort_reverse = True if col_idx in [2, 3] else False
+            self._current_sort_col = col_idx; self._current_sort_reverse = True if col_idx in [2, 3] else False
         self._refresh_display_order()
 
     def _get_item_data_for_history(self, item_obj):
         """Prepares a dictionary of item data for saving to history."""
         return {
-            'id': item_obj.item_id,
-            'source_path': item_obj.source_path, # Now source_path
-            'quality': item_obj.quality,
-            'filename': item_obj.filename,
-            'mp3_conversion': item_obj.mp3_conversion,
-            'source': item_obj.source,
-            'referer': item_obj.referer,
-            'video_title': item_obj.video_title,
-            'status': item_obj.status,
-            'date_added': item_obj.date_added,
-            'date_completed': item_obj.date_completed,
+            'id': item_obj.item_id, 'source_path': item_obj.source_path, 'quality': item_obj.quality,
+            'filename': item_obj.filename, 'mp3_conversion': item_obj.mp3_conversion, 'source': item_obj.source,
+            'referer': item_obj.referer, 'video_title': item_obj.video_title, 'status': item_obj.status,
+            'date_added': item_obj.date_added, 'date_completed': item_obj.date_completed,
             'filename_provided_by_user': item_obj.filename_provided_by_user,
             'elapsed_time_seconds': item_obj.elapsed_time_seconds
         }
 
     def _save_downloads_to_local_history(self):
         """Saves the current finished tasks data (from map) to a local JSON file."""
-        history_to_save = [
-            self._get_item_data_for_history(item)
-            for item in self.download_items_map.values()
-            if not item.is_active_item
-        ]
+        history_to_save = [self._get_item_data_for_history(item) for item in self.download_items_map.values() if
+                           not item.is_active_item]
         history_to_save.sort(key=lambda x: time.mktime(time.strptime(x['date_completed'], "%m/%d/%y")) if x[
                                                                                                               'date_completed'] != 'N/A' else time.time(),
                              reverse=True)
-
         try:
             with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
                 json.dump(history_to_save, f, indent=4)
@@ -1408,43 +1416,25 @@ class YTDLPGUIApp:
             try:
                 with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                     loaded_history_data = json.load(f)
-
-                    if loaded_history_data:
-                        all_ids = [item['id'] for item in loaded_history_data]
-                        if all_ids:
-                            self.download_item_counter = max(all_ids) + 1
-                        else:
-                            self.download_item_counter = 0
-                    else:
-                        self.download_item_counter = 0
-
+                    self.download_item_counter = max(
+                        [item['id'] for item in loaded_history_data]) + 1 if loaded_history_data else 0
                     for item_data in loaded_history_data:
-                        # Handle backward compatibility for 'url' field if 'source_path' is missing
-                        if 'source_path' not in item_data and 'url' in item_data:
-                            item_data['source_path'] = item_data['url']
-                            del item_data['url'] # Clean up the old key if you want to standardize
-
-                        # Before creating DownloadItem, parse date_added and date_completed to ensure
-                        # they are in the expected "MM/DD/YY" format for consistency, especially if loading
-                        # from an older history file format.
-                        # Convert old "MM|DD|YYYY - H:MMpm" to "MM/DD/YY"
+                        if 'source_path' not in item_data and 'url' in item_data: item_data['source_path'] = item_data[
+                            'url']; del item_data['url']
                         if item_data.get('date_added') and '|' in item_data['date_added']:
                             try:
-                                dt_obj = time.strptime(item_data['date_added'], "%m|%d|%Y - %I:%M%p")
-                                item_data['date_added'] = time.strftime("%m/%d/%y", dt_obj)
+                                dt_obj = time.strptime(item_data['date_added'], "%m|%d|%Y - %I:%M%p"); item_data[
+                                    'date_added'] = time.strftime("%m/%d/%y", dt_obj)
                             except ValueError:
-                                pass  # Keep as is if parsing fails
-
+                                pass
                         if item_data.get('date_completed') and '|' in item_data['date_completed']:
                             try:
-                                dt_obj = time.strptime(item_data['date_completed'], "%m|%d|%Y - %I:%M%p")
-                                item_data['date_completed'] = time.strftime("%m/%d/%y", dt_obj)
+                                dt_obj = time.strptime(item_data['date_completed'], "%m|%d|%Y - %I:%M%p"); item_data[
+                                    'date_completed'] = time.strftime("%m/%d/%y", dt_obj)
                             except ValueError:
-                                pass  # Keep as is if parsing fails
-
+                                pass
                         history_item = DownloadItem(self, item_data, is_active_item=False)
                         self.download_items_map[item_data['id']] = history_item
-
                 self._refresh_display_order()
             except (IOError, json.JSONDecodeError) as e:
                 print(f"Error loading history: {e}")
@@ -1454,25 +1444,25 @@ class YTDLPGUIApp:
             self.download_item_counter = 0
 
     def _cleanup_temp_directories_on_launch(self):
-        """
-        Cleans up any lingering temporary download directories from previous sessions
-        upon application launch.
-        """
-        full_temp_dir_path = os.path.join(os.getcwd(), DOWNLOADS_DIR, TEMP_SUBDIR)
+        """Cleans up any lingering temporary download directories from previous sessions upon application launch."""
+        # Use output_directory from settings to find the temp folder
+        downloads_base_path = os.path.join(os.getcwd(), self.settings['output_directory'])
+        full_temp_dir_path = os.path.join(downloads_base_path, TEMP_SUBDIR)
+
         if os.path.exists(full_temp_dir_path):
             print(f"Checking for lingering temporary directories in: {full_temp_dir_path}")
             for entry in os.listdir(full_temp_dir_path):
                 entry_path = os.path.join(full_temp_dir_path, entry)
                 if os.path.isdir(entry_path):
                     try:
-                        print(f"Deleting lingering temporary directory: {entry_path}")
-                        shutil.rmtree(entry_path)
+                        print(f"Deleting lingering temporary directory: {entry_path}"); shutil.rmtree(entry_path)
                     except Exception as e:
                         print(f"Error deleting lingering temporary directory {entry_path}: {e}")
         else:
             print(f"Temporary directory not found: {full_temp_dir_path}. No cleanup needed.")
 
 
+# Ensure main() is defined AFTER the class YTDLPGUIApp
 def main():
     root = tk.Tk()
     app = YTDLPGUIApp(root)
@@ -1481,4 +1471,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
