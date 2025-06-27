@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Executables
+yt-dlp.exe
+ffmpeg.exe
+YoutubeDownloader.exe
+
+# VS Code and PyCharm
+.vscode/
+.idea/
+*.iml
