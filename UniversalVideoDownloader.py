@@ -29,6 +29,7 @@ COLOR_CLEAR_BUTTON = "#FFC107"  # Yellow-Orange
 COLOR_OPEN_FOLDER_BUTTON = "#6C754C"  # Dark Grey/Greenish Grey
 COLOR_OPEN_FILE_BUTTON = "#17A2B8"  # Info Blue/Cyan
 COLOR_BROWSE_FILE_BUTTON = "#007BFF"  # Blue for browse
+COLOR_REMOVE_BUTTON = "#6C757D"  # Grey
 
 COLOR_STATUS_READY = "black"
 COLOR_STATUS_PROGRESS = "#007BFF"  # Blue
@@ -107,6 +108,7 @@ class DownloadItem:
         self.frame.columnconfigure(3, weight=1)
         self.frame.columnconfigure(4, weight=1)
         self.frame.columnconfigure(5, weight=1)
+        self.frame.columnconfigure(6, weight=1)  # Added for new 'Remove' button
 
         self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", justify="left")
         self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
@@ -144,14 +146,20 @@ class DownloadItem:
                                           bg=COLOR_OPEN_FILE_BUTTON, fg="white", font=SMALL_FONT, width=10)
         self.retry_button = tk.Button(self.frame, text="Retry", command=self.retry_download, bg=COLOR_ADD_BUTTON,
                                       fg="white", font=SMALL_FONT, width=10)
+        self.remove_button = tk.Button(self.frame, text="Remove", command=self._confirm_and_remove,
+                                       bg=COLOR_REMOVE_BUTTON,
+                                       fg="white", font=SMALL_FONT, width=10)  # New Remove button
 
         if self.is_active_item:
             self.abort_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
+            self.remove_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)  # Placed next to abort
         else:
             if self.status in ['failed', 'aborted', 'cancelled']:
                 self.retry_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
+                self.remove_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)  # Placed next to retry
             elif self.status == 'completed':
                 self.open_file_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
+                self.remove_button.grid(row=0, column=6, sticky="e", padx=2, pady=0)  # Placed next to open file
 
         self._update_progress_visibility()
 
@@ -570,6 +578,61 @@ class DownloadItem:
         except Exception as e:
             messagebox.showerror("Error", f"Could not open file location: {e}")
 
+    def _confirm_and_remove(self):
+        """
+        Opens a confirmation dialog for removing a download item,
+        with options to delete the file and remember the choice.
+        """
+        # Check if "Don't show this again" is active and apply remembered choice
+        if self.app_instance.settings['remember_delete_choice']:
+            delete_file = self.app_instance.settings['delete_file_on_remove']
+            self.app_instance._remove_item_from_list_and_disk(self, delete_file)
+            return
+
+        confirm_win = tk.Toplevel(self.app_instance.master)
+        confirm_win.title("Confirm Removal")
+        confirm_win.geometry("400x180")
+        confirm_win.transient(self.app_instance.master)
+        confirm_win.grab_set()
+        confirm_win.resizable(False, False)
+
+        tk.Label(confirm_win, text=f"Are you sure you want to remove '{self.video_title}'?",
+                 font=MAIN_FONT, wraplength=350).pack(pady=10)
+
+        delete_file_var = tk.BooleanVar(
+            value=self.app_instance.settings['delete_file_on_remove_default'])  # Initialize with default setting
+        remember_delete_choice_var = tk.BooleanVar(value=False)  # Always starts unchecked for the dialog itself
+
+        tk.Checkbutton(confirm_win, text="Also delete file from disk?", variable=delete_file_var,
+                       font=SMALL_FONT).pack(anchor="w", padx=20)
+        tk.Checkbutton(confirm_win, text="Don't show this again (remember my choice)", variable=remember_delete_choice_var,
+                       font=SMALL_FONT).pack(anchor="w", padx=20)
+
+        def on_yes():
+            delete_file = delete_file_var.get()
+            if remember_delete_choice_var.get():
+                self.app_instance.settings['remember_delete_choice'] = True
+                self.app_instance.settings['delete_file_on_remove'] = delete_file
+                self.app_instance.settings[
+                    'delete_file_on_remove_default'] = delete_file  # Update default for next time
+                self.app_instance._save_settings()  # Save this preference immediately
+            confirm_win.destroy()
+            self.app_instance._remove_item_from_list_and_disk(self, delete_file)
+
+        def on_no():
+            confirm_win.destroy()
+
+        button_frame = tk.Frame(confirm_win)
+        button_frame.pack(pady=10)
+
+        tk.Button(button_frame, text="Yes", command=on_yes, bg=COLOR_ABORT_BUTTON, fg="white", font=SMALL_FONT,
+                  width=8).pack(side="left", padx=5)
+        tk.Button(button_frame, text="No", command=on_no, bg=COLOR_ADD_BUTTON, fg="white", font=SMALL_FONT,
+                  width=8).pack(side="left", padx=5)
+
+        confirm_win.protocol("WM_DELETE_WINDOW", on_no)  # Handle window close button
+        confirm_win.wait_window()
+
 
 class YTDLPGUIApp:
     def __init__(self, master):
@@ -596,7 +659,7 @@ class YTDLPGUIApp:
 
         self.master.after(100, self._process_queue_loop)
         # Initialize UI state based on default source (Default) and settings
-        self.on_source_change(DEFAULT_SOURCE)  # Changed from YOUTUBE_SOURCE
+        self.on_source_change(DEFAULT_SOURCE)
         self.master.after_idle(self._refresh_display_order)
 
         self.selected_local_filepath = None
@@ -606,8 +669,12 @@ class YTDLPGUIApp:
             "show_log_window": False,
             "max_concurrent_downloads": DEFAULT_MAX_CONCURRENT_DOWNLOADS,
             "output_directory": DEFAULT_DOWNLOADS_DIR,
-            "default_default_quality": "Auto (Best available)",  # Renamed from default_youtube_quality
-            "default_local_quality": "Medium Quality MP4"
+            "default_default_quality": "Auto (Best available)",
+            "default_local_quality": "Medium Quality MP4",
+            "remember_delete_choice": False,  # New setting: if True, skips confirmation dialog
+            "delete_file_on_remove": False,
+            # New setting: stores the remembered choice (if remember_delete_choice is True)
+            "delete_file_on_remove_default": False  # New setting: default for 'also delete file' checkbox in dialog
         }
 
     def _load_settings(self):
@@ -617,13 +684,14 @@ class YTDLPGUIApp:
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     loaded_settings = json.load(f)
                     # Update defaults with loaded settings, ensuring new keys are added
-                    settings.update(loaded_settings)
+                    for key, value in loaded_settings.items():
+                        if key in settings:  # Only update if key exists in default settings
+                            settings[key] = value
 
                     # Handle renaming of default_youtube_quality to default_default_quality
                     if 'default_youtube_quality' in loaded_settings and 'default_default_quality' not in loaded_settings:
                         settings['default_default_quality'] = loaded_settings['default_youtube_quality']
-                        del settings['default_youtube_quality']  # Remove old key if present
-
+                        # No need to del, as we only copy existing keys into settings
             except (IOError, json.JSONDecodeError) as e:
                 print(f"Error loading settings from {CONFIG_FILE}: {e}")
                 messagebox.showwarning("Settings Load Error",
@@ -685,7 +753,7 @@ class YTDLPGUIApp:
     def _create_settings_window(self):
         settings_win = tk.Toplevel(self.master)
         settings_win.title("Settings")
-        settings_win.geometry("500x300")
+        settings_win.geometry("500x400")  # Increased height for new options
         settings_win.transient(self.master)  # Make it appear on top of the main window
         settings_win.grab_set()  # Make it modal
         settings_win.resizable(False, False)
@@ -698,9 +766,13 @@ class YTDLPGUIApp:
         max_downloads_var = tk.IntVar(value=self.settings['max_concurrent_downloads'])
         output_dir_var = tk.StringVar(value=self.settings['output_directory'])
         show_log_var = tk.BooleanVar(value=self.settings['show_log_window'])
-        default_default_quality_var = tk.StringVar(
-            value=self.settings['default_default_quality'])  # Changed from default_youtube_quality_var
+        default_default_quality_var = tk.StringVar(value=self.settings['default_default_quality'])
         default_local_quality_var = tk.StringVar(value=self.settings['default_local_quality'])
+
+        # New variables for removal settings
+        remember_delete_choice_var = tk.BooleanVar(value=self.settings['remember_delete_choice'])
+        delete_file_on_remove_var = tk.BooleanVar(value=self.settings['delete_file_on_remove'])
+        delete_file_on_remove_default_var = tk.BooleanVar(value=self.settings['delete_file_on_remove_default'])
 
         # Max Concurrent Downloads
         ttk.Label(settings_frame, text="Max Concurrent Downloads:").grid(row=0, column=0, sticky="w", pady=5)
@@ -721,14 +793,11 @@ class YTDLPGUIApp:
                                                                                                         pady=5)
 
         # Default Default Quality (formerly YouTube)
-        ttk.Label(settings_frame, text="Default Source Quality:").grid(row=3, column=0, sticky="w",
-                                                                       pady=5)  # Updated label
+        ttk.Label(settings_frame, text="Default Source Quality:").grid(row=3, column=0, sticky="w", pady=5)
         default_quality_options = ["Auto (Best available)", "High Quality - 1080p", "Medium Quality - 720p",
                                    "Low Quality - 480p"]
         default_quality_menu = ttk.OptionMenu(settings_frame, default_default_quality_var,
-                                              # Changed from default_youtube_quality_var
-                                              default_default_quality_var.get(),
-                                              *default_quality_options)  # Changed from default_youtube_quality_var
+                                              default_default_quality_var.get(), *default_quality_options)
         default_quality_menu.grid(row=3, column=1, sticky="ew", pady=5)
 
         # Default Local Quality
@@ -737,6 +806,44 @@ class YTDLPGUIApp:
         local_quality_menu = ttk.OptionMenu(settings_frame, default_local_quality_var, default_local_quality_var.get(),
                                             *local_quality_options)
         local_quality_menu.grid(row=4, column=1, sticky="ew", pady=5)
+
+        # New: Remove Confirmation Settings
+        ttk.Label(settings_frame, text="Remove Entry Options:", font=BOLD_FONT).grid(row=5, column=0, columnspan=3,
+                                                                                     sticky="w", pady=(15, 5))
+
+        # "Don't show this again" checkbox
+        remember_choice_checkbox = ttk.Checkbutton(settings_frame, text="Don't show removal confirmation dialog",
+                                                   variable=remember_delete_choice_var)
+        remember_choice_checkbox.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+
+        # "Automatically delete file on remove" checkbox (only active if "Don't show this again" is checked)
+        delete_file_on_remove_checkbox = ttk.Checkbutton(settings_frame,
+                                                         text="Automatically delete file when removing entry",
+                                                         variable=delete_file_on_remove_var)
+        delete_file_on_remove_checkbox.grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+
+        # Default state for "Also delete file?" checkbox in the dialog
+        delete_file_on_remove_default_checkbox = ttk.Checkbutton(settings_frame,
+                                                                 text="Default: 'Also delete file?' checked",
+                                                                 variable=delete_file_on_remove_default_var)
+        delete_file_on_remove_default_checkbox.grid(row=8, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+
+        # Function to enable/disable delete_file_on_remove_checkbox
+        def toggle_delete_file_checkbox_state():
+            if remember_delete_choice_var.get():
+                delete_file_on_remove_checkbox.config(state="normal")
+            else:
+                delete_file_on_remove_checkbox.config(state="disabled")
+                # When "Don't show this again" is unchecked, the 'delete_file_on_remove' setting is irrelevant
+                # for *automatic* deletion, but its value should persist for when 'remember_choice' is re-enabled.
+                # However, for clarity in the UI, we can uncheck it if the main "remember" is off.
+                # The actual remembered value is saved in self.settings['delete_file_on_remove']
+                # when the user clicks 'Yes' and 'Don't show this again'.
+                delete_file_on_remove_var.set(False)  # Uncheck when disabled for clearer UI feedback
+
+        remember_delete_choice_var.trace_add("write", lambda *args: toggle_delete_file_checkbox_state())
+        # Initial call to set state correctly on window open
+        toggle_delete_file_checkbox_state()
 
         def apply_settings():
             try:
@@ -768,9 +875,13 @@ class YTDLPGUIApp:
                 os.makedirs(full_path_to_create, exist_ok=True)
 
                 self.settings['show_log_window'] = show_log_var.get()
-                self.settings[
-                    'default_default_quality'] = default_default_quality_var.get()  # Changed from default_youtube_quality
+                self.settings['default_default_quality'] = default_default_quality_var.get()
                 self.settings['default_local_quality'] = default_local_quality_var.get()
+
+                # Save new removal settings
+                self.settings['remember_delete_choice'] = remember_delete_choice_var.get()
+                self.settings['delete_file_on_remove'] = delete_file_on_remove_var.get()
+                self.settings['delete_file_on_remove_default'] = delete_file_on_remove_default_var.get()
 
                 # Apply log window setting immediately
                 self.log_toggle_var.set(self.settings['show_log_window'])
@@ -792,7 +903,7 @@ class YTDLPGUIApp:
             if self._save_settings():
                 settings_win.destroy()
                 # Update main window's default qualities immediately after saving
-                self.quality_var.set(self.settings['default_default_quality'])  # Changed from default_youtube_quality
+                self.quality_var.set(self.settings['default_default_quality'])
                 self.local_quality_var.set(self.settings['default_local_quality'])
                 self._set_status("Settings saved and applied.", COLOR_STATUS_COMPLETE)
             else:
@@ -892,9 +1003,8 @@ class YTDLPGUIApp:
 
         # Source Selection (Row 0)
         tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        self.source_var = tk.StringVar(value=DEFAULT_SOURCE)  # Changed from YOUTUBE_SOURCE
+        self.source_var = tk.StringVar(value=DEFAULT_SOURCE)
         self.source_menu = tk.OptionMenu(input_frame, self.source_var, DEFAULT_SOURCE, XTREAM_SOURCE, LOCAL_SOURCE,
-                                         # Changed from YOUTUBE_SOURCE
                                          command=self.on_source_change)
         self.source_menu.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
         self.master.update_idletasks()  # Force update after gridding OptionMenu
@@ -916,8 +1026,7 @@ class YTDLPGUIApp:
                                             font=SMALL_FONT, width=15)
 
         # Initialize quality_var with default setting
-        self.quality_var = tk.StringVar(
-            value=self.settings['default_default_quality'])  # Changed from default_youtube_quality
+        self.quality_var = tk.StringVar(value=self.settings['default_default_quality'])
         self.quality_label = tk.Label(self.dynamic_input_container, text="Quality:", font=MAIN_FONT)
         self.quality_menu = tk.OptionMenu(self.dynamic_input_container, self.quality_var,
                                           "Auto (Best available)")  # Options will be updated by _update_quality_options_grouped
@@ -1033,7 +1142,7 @@ class YTDLPGUIApp:
 
         current_row_idx = 0  # Start from row 0 within the dynamic_input_container
 
-        if value == DEFAULT_SOURCE:  # Changed from YOUTUBE_SOURCE
+        if value == DEFAULT_SOURCE:
             self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             current_row_idx += 1
@@ -1047,7 +1156,7 @@ class YTDLPGUIApp:
             self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
             self.mp3_check.config(state="normal")
             # Set default quality from settings
-            self.quality_var.set(self.settings['default_default_quality'])  # Changed from default_youtube_quality
+            self.quality_var.set(self.settings['default_default_quality'])
 
 
         elif value == XTREAM_SOURCE:
@@ -1064,7 +1173,7 @@ class YTDLPGUIApp:
             self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
             self.mp3_check.config(state="normal")
             # Set default quality from settings (it's "Auto" for XtremeStream anyway)
-            self.quality_var.set(self.settings['default_default_quality'])  # Changed from default_youtube_quality
+            self.quality_var.set(self.settings['default_default_quality'])
 
 
         elif value == LOCAL_SOURCE:
@@ -1305,13 +1414,34 @@ class YTDLPGUIApp:
             self._set_status(f"Task for '{item.video_title}' failed.", COLOR_STATUS_FAILED)
         self._refresh_display_order()
 
-    def remove_from_queue(self, item_to_remove):
-        """Removes a specified item from the queued_downloads list."""
-        if item_to_remove in self.queued_downloads:
-            self.queued_downloads.remove(item_to_remove);
-            self.download_items_map.pop(item_to_remove.item_id, None)
-            self._refresh_display_order();
-            self._set_status(f"Removed '{item_to_remove.video_title}' from queue.", COLOR_STATUS_READY)
+    def _remove_item_from_list_and_disk(self, item_obj, delete_file_from_disk):
+        """
+        Removes a download item from the application's list and optionally deletes its associated file.
+        """
+        if item_obj.is_active_item:
+            item_obj.abort_download()  # Abort if active, which will then call download_finished and remove it.
+            # The item will be removed from download_items_map and history saved by download_finished
+        else:
+            # If not active, remove directly from map and save history
+            if item_obj.item_id in self.download_items_map:
+                self.download_items_map.pop(item_obj.item_id)
+                self._save_downloads_to_local_history()
+                self._refresh_display_order()
+                self._set_status(f"Removed '{item_obj.video_title}' from list.", COLOR_STATUS_READY)
+
+        if delete_file_from_disk:
+            expected_ext = ".mp4" if item_obj.is_local_conversion else (".mp3" if item_obj.mp3_conversion else ".mp4")
+            downloads_dir = os.path.join(os.getcwd(), self.settings['output_directory'])
+            full_filepath = os.path.join(downloads_dir, item_obj.filename + expected_ext)
+            if os.path.exists(full_filepath):
+                try:
+                    os.remove(full_filepath)
+                    self._set_status(f"Removed '{item_obj.video_title}' and deleted file.", COLOR_STATUS_COMPLETE)
+                except Exception as e:
+                    messagebox.showerror("File Deletion Error", f"Could not delete file '{item_obj.filename}': {e}")
+                    self._set_status(f"Failed to delete file for '{item_obj.video_title}'.", COLOR_STATUS_FAILED)
+            else:
+                self._set_status(f"File for '{item_obj.video_title}' not found for deletion.", COLOR_STATUS_READY)
 
     def _clear_queue(self):
         """Clears all items from the active and queued downloads."""
@@ -1350,6 +1480,7 @@ class YTDLPGUIApp:
         header_frame.columnconfigure(3, weight=1);
         header_frame.columnconfigure(4, weight=1);
         header_frame.columnconfigure(5, weight=1)
+        header_frame.columnconfigure(6, weight=1)  # Added for new 'Remove' column
 
         for col_name, col_idx in columns:
             lbl = tk.Label(header_frame, text=col_name, font=BOLD_FONT, bg="#e0e0e0", borderwidth=1, relief="ridge")
