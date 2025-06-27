@@ -7,7 +7,7 @@ import urllib.request
 YT_DLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 YT_DLP_EXE = "yt-dlp.exe"
 FFMPEG_EXE = "ffmpeg.exe"  # Define FFmpeg executable name
-APP_EXE_NAME = "YoutubeDownloader.exe"  # Define the main application executable name
+APP_EXE_NAME = "UniversalVideoDownloader.exe"  # Define the main application executable name
 
 
 def ensure_installed(package):
@@ -108,7 +108,7 @@ def delete_existing_exe():
 
 def clean_build_files():
     folders = ['build', '__pycache__', 'dist']
-    files = ['YoutubeDownloader.spec']  # This assumes your spec file name
+    files = ['UniversalVideoDownloader.spec']  # This assumes your spec file name
 
     for folder in folders:
         if os.path.isdir(folder):

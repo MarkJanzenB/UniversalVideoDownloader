@@ -15,7 +15,7 @@ import tkinter.font
 # These are now mostly internal or default values, can be overridden by settings
 DEFAULT_DOWNLOADS_DIR = "downloads"
 TEMP_SUBDIR = "temp"
-YOUTUBE_SOURCE = "YouTube"
+DEFAULT_SOURCE = "Default"  # Renamed from YOUTUBE_SOURCE
 XTREAM_SOURCE = "XtremeStream"
 LOCAL_SOURCE = "Local"
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2  # Default, overridden by settings
@@ -78,7 +78,7 @@ class DownloadItem:
         else:
             self.is_title_fetched = self.filename_provided_by_user or (self.video_title != 'Fetching Title...')
             self.ready_for_download = not (
-                        is_active_item and not self.filename_provided_by_user and not self.is_title_fetched)
+                    is_active_item and not self.filename_provided_by_user and not self.is_title_fetched)
             self.expected_final_ext = ".mp3" if self.mp3_conversion else ".mp4"
 
         self.process = None
@@ -196,7 +196,7 @@ class DownloadItem:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def fetch_title_async(self):
-        """Fetches the video title asynchronously and updates the label. Only for YouTube/XtremeStream."""
+        """Fetches the video title asynchronously and updates the label. Only for Default/XtremeStream."""
         if self.is_local_conversion:
             self.is_title_fetched = True
             self.ready_for_download = True
@@ -356,7 +356,7 @@ class DownloadItem:
             else:
                 command += ["--recode-video", "mp4", "--output", os.path.join(temp_dir, out_name + ".mp4")]
                 self.expected_final_ext = ".mp4"
-            if self.source == YOUTUBE_SOURCE:
+            if self.source == DEFAULT_SOURCE:  # Changed from YOUTUBE_SOURCE
                 if "Auto (Best available)" in self.quality:
                     command += ['-f', 'bestvideo+bestaudio/best']
                 elif self.quality == "High Quality - 1080p":
@@ -400,7 +400,8 @@ class DownloadItem:
                 if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists(): self.progress_bar.stop()
 
             if self.is_aborted:
-                final_status = "aborted"; self.update_status("aborted", COLOR_STATUS_ABORTED)
+                final_status = "aborted";
+                self.update_status("aborted", COLOR_STATUS_ABORTED)
             elif rc == 0:
                 final_status = "completed";
                 self.update_status("completed", COLOR_STATUS_COMPLETE)
@@ -425,7 +426,8 @@ class DownloadItem:
                     self.app_instance.master.after(0, lambda: messagebox.showwarning("File Not Found",
                                                                                      f"Final converted file was not found where expected in temp folder: {final_file_in_temp}"))
             else:
-                final_status = "failed"; self.update_status("failed", COLOR_STATUS_FAILED)
+                final_status = "failed";
+                self.update_status("failed", COLOR_STATUS_FAILED)
         except FileNotFoundError:
             final_status = "failed";
             self.update_status("failed", COLOR_STATUS_FAILED)
@@ -593,8 +595,8 @@ class YTDLPGUIApp:
         self._load_downloads_from_local_history()
 
         self.master.after(100, self._process_queue_loop)
-        # Initialize UI state based on default source (YouTube) and settings
-        self.on_source_change(YOUTUBE_SOURCE)
+        # Initialize UI state based on default source (Default) and settings
+        self.on_source_change(DEFAULT_SOURCE)  # Changed from YOUTUBE_SOURCE
         self.master.after_idle(self._refresh_display_order)
 
         self.selected_local_filepath = None
@@ -604,7 +606,7 @@ class YTDLPGUIApp:
             "show_log_window": False,
             "max_concurrent_downloads": DEFAULT_MAX_CONCURRENT_DOWNLOADS,
             "output_directory": DEFAULT_DOWNLOADS_DIR,
-            "default_youtube_quality": "Auto (Best available)",
+            "default_default_quality": "Auto (Best available)",  # Renamed from default_youtube_quality
             "default_local_quality": "Medium Quality MP4"
         }
 
@@ -616,6 +618,12 @@ class YTDLPGUIApp:
                     loaded_settings = json.load(f)
                     # Update defaults with loaded settings, ensuring new keys are added
                     settings.update(loaded_settings)
+
+                    # Handle renaming of default_youtube_quality to default_default_quality
+                    if 'default_youtube_quality' in loaded_settings and 'default_default_quality' not in loaded_settings:
+                        settings['default_default_quality'] = loaded_settings['default_youtube_quality']
+                        del settings['default_youtube_quality']  # Remove old key if present
+
             except (IOError, json.JSONDecodeError) as e:
                 print(f"Error loading settings from {CONFIG_FILE}: {e}")
                 messagebox.showwarning("Settings Load Error",
@@ -690,7 +698,8 @@ class YTDLPGUIApp:
         max_downloads_var = tk.IntVar(value=self.settings['max_concurrent_downloads'])
         output_dir_var = tk.StringVar(value=self.settings['output_directory'])
         show_log_var = tk.BooleanVar(value=self.settings['show_log_window'])
-        default_youtube_quality_var = tk.StringVar(value=self.settings['default_youtube_quality'])
+        default_default_quality_var = tk.StringVar(
+            value=self.settings['default_default_quality'])  # Changed from default_youtube_quality_var
         default_local_quality_var = tk.StringVar(value=self.settings['default_local_quality'])
 
         # Max Concurrent Downloads
@@ -711,13 +720,16 @@ class YTDLPGUIApp:
                                                                                                         sticky="w",
                                                                                                         pady=5)
 
-        # Default YouTube Quality
-        ttk.Label(settings_frame, text="Default YouTube Quality:").grid(row=3, column=0, sticky="w", pady=5)
-        youtube_quality_options = ["Auto (Best available)", "High Quality - 1080p", "Medium Quality - 720p",
+        # Default Default Quality (formerly YouTube)
+        ttk.Label(settings_frame, text="Default Source Quality:").grid(row=3, column=0, sticky="w",
+                                                                       pady=5)  # Updated label
+        default_quality_options = ["Auto (Best available)", "High Quality - 1080p", "Medium Quality - 720p",
                                    "Low Quality - 480p"]
-        youtube_quality_menu = ttk.OptionMenu(settings_frame, default_youtube_quality_var,
-                                              default_youtube_quality_var.get(), *youtube_quality_options)
-        youtube_quality_menu.grid(row=3, column=1, sticky="ew", pady=5)
+        default_quality_menu = ttk.OptionMenu(settings_frame, default_default_quality_var,
+                                              # Changed from default_youtube_quality_var
+                                              default_default_quality_var.get(),
+                                              *default_quality_options)  # Changed from default_youtube_quality_var
+        default_quality_menu.grid(row=3, column=1, sticky="ew", pady=5)
 
         # Default Local Quality
         ttk.Label(settings_frame, text="Default Local Conversion Quality:").grid(row=4, column=0, sticky="w", pady=5)
@@ -756,7 +768,8 @@ class YTDLPGUIApp:
                 os.makedirs(full_path_to_create, exist_ok=True)
 
                 self.settings['show_log_window'] = show_log_var.get()
-                self.settings['default_youtube_quality'] = default_youtube_quality_var.get()
+                self.settings[
+                    'default_default_quality'] = default_default_quality_var.get()  # Changed from default_youtube_quality
                 self.settings['default_local_quality'] = default_local_quality_var.get()
 
                 # Apply log window setting immediately
@@ -779,7 +792,7 @@ class YTDLPGUIApp:
             if self._save_settings():
                 settings_win.destroy()
                 # Update main window's default qualities immediately after saving
-                self.quality_var.set(self.settings['default_youtube_quality'])
+                self.quality_var.set(self.settings['default_default_quality'])  # Changed from default_youtube_quality
                 self.local_quality_var.set(self.settings['default_local_quality'])
                 self._set_status("Settings saved and applied.", COLOR_STATUS_COMPLETE)
             else:
@@ -879,8 +892,9 @@ class YTDLPGUIApp:
 
         # Source Selection (Row 0)
         tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        self.source_var = tk.StringVar(value=YOUTUBE_SOURCE)
-        self.source_menu = tk.OptionMenu(input_frame, self.source_var, YOUTUBE_SOURCE, XTREAM_SOURCE, LOCAL_SOURCE,
+        self.source_var = tk.StringVar(value=DEFAULT_SOURCE)  # Changed from YOUTUBE_SOURCE
+        self.source_menu = tk.OptionMenu(input_frame, self.source_var, DEFAULT_SOURCE, XTREAM_SOURCE, LOCAL_SOURCE,
+                                         # Changed from YOUTUBE_SOURCE
                                          command=self.on_source_change)
         self.source_menu.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
         self.master.update_idletasks()  # Force update after gridding OptionMenu
@@ -902,7 +916,8 @@ class YTDLPGUIApp:
                                             font=SMALL_FONT, width=15)
 
         # Initialize quality_var with default setting
-        self.quality_var = tk.StringVar(value=self.settings['default_youtube_quality'])
+        self.quality_var = tk.StringVar(
+            value=self.settings['default_default_quality'])  # Changed from default_youtube_quality
         self.quality_label = tk.Label(self.dynamic_input_container, text="Quality:", font=MAIN_FONT)
         self.quality_menu = tk.OptionMenu(self.dynamic_input_container, self.quality_var,
                                           "Auto (Best available)")  # Options will be updated by _update_quality_options_grouped
@@ -1011,14 +1026,14 @@ class YTDLPGUIApp:
             self.yt_dlp_path = 'yt-dlp.exe'
 
     def on_source_change(self, value):
-        """Adjusts UI based on selected source (YouTube, XtremeStream, or Local)."""
+        """Adjusts UI based on selected source (Default, XtremeStream, or Local)."""
         # Clear previous dynamic inputs in the container
         for widget in self.dynamic_input_container.winfo_children():
             widget.grid_forget()
 
         current_row_idx = 0  # Start from row 0 within the dynamic_input_container
 
-        if value == YOUTUBE_SOURCE:
+        if value == DEFAULT_SOURCE:  # Changed from YOUTUBE_SOURCE
             self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             current_row_idx += 1
@@ -1032,7 +1047,7 @@ class YTDLPGUIApp:
             self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
             self.mp3_check.config(state="normal")
             # Set default quality from settings
-            self.quality_var.set(self.settings['default_youtube_quality'])
+            self.quality_var.set(self.settings['default_default_quality'])  # Changed from default_youtube_quality
 
 
         elif value == XTREAM_SOURCE:
@@ -1049,7 +1064,7 @@ class YTDLPGUIApp:
             self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
             self.mp3_check.config(state="normal")
             # Set default quality from settings (it's "Auto" for XtremeStream anyway)
-            self.quality_var.set(self.settings['default_youtube_quality'])
+            self.quality_var.set(self.settings['default_default_quality'])  # Changed from default_youtube_quality
 
 
         elif value == LOCAL_SOURCE:
@@ -1168,7 +1183,7 @@ class YTDLPGUIApp:
         if self.source_var.get() != LOCAL_SOURCE: self._add_current_to_queue()
 
     def _on_url_focus_out(self, event=None):
-        """Attempts to pre-fill filename based on URL if not provided by user and source is YouTube/XtremeStream."""
+        """Attempts to pre-fill filename based on URL if not provided by user and source is Default/XtremeStream."""
         if self.source_var.get() == LOCAL_SOURCE: return
         url = self.url_entry.get().strip()
         if url and not self.filename_entry.get().strip():
@@ -1383,7 +1398,8 @@ class YTDLPGUIApp:
         if prev_col == col_idx:
             self._current_sort_reverse = not prev_rev
         else:
-            self._current_sort_col = col_idx; self._current_sort_reverse = True if col_idx in [2, 3] else False
+            self._current_sort_col = col_idx;
+            self._current_sort_reverse = True if col_idx in [2, 3] else False
         self._refresh_display_order()
 
     def _get_item_data_for_history(self, item_obj):
@@ -1419,17 +1435,25 @@ class YTDLPGUIApp:
                     self.download_item_counter = max(
                         [item['id'] for item in loaded_history_data]) + 1 if loaded_history_data else 0
                     for item_data in loaded_history_data:
-                        if 'source_path' not in item_data and 'url' in item_data: item_data['source_path'] = item_data[
-                            'url']; del item_data['url']
+                        # Handle old 'url' key if present
+                        if 'source_path' not in item_data and 'url' in item_data:
+                            item_data['source_path'] = item_data['url']
+                            del item_data['url']
+                        # Handle old 'YouTube' source name if present
+                        if item_data.get('source') == "YouTube":
+                            item_data['source'] = DEFAULT_SOURCE
+
                         if item_data.get('date_added') and '|' in item_data['date_added']:
                             try:
-                                dt_obj = time.strptime(item_data['date_added'], "%m|%d|%Y - %I:%M%p"); item_data[
+                                dt_obj = time.strptime(item_data['date_added'], "%m|%d|%Y - %I:%M%p");
+                                item_data[
                                     'date_added'] = time.strftime("%m/%d/%y", dt_obj)
                             except ValueError:
                                 pass
                         if item_data.get('date_completed') and '|' in item_data['date_completed']:
                             try:
-                                dt_obj = time.strptime(item_data['date_completed'], "%m|%d|%Y - %I:%M%p"); item_data[
+                                dt_obj = time.strptime(item_data['date_completed'], "%m|%d|%Y - %I:%M%p");
+                                item_data[
                                     'date_completed'] = time.strftime("%m/%d/%y", dt_obj)
                             except ValueError:
                                 pass
@@ -1455,7 +1479,8 @@ class YTDLPGUIApp:
                 entry_path = os.path.join(full_temp_dir_path, entry)
                 if os.path.isdir(entry_path):
                     try:
-                        print(f"Deleting lingering temporary directory: {entry_path}"); shutil.rmtree(entry_path)
+                        print(f"Deleting lingering temporary directory: {entry_path}");
+                        shutil.rmtree(entry_path)
                     except Exception as e:
                         print(f"Error deleting lingering temporary directory {entry_path}: {e}")
         else:
