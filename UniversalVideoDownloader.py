@@ -370,7 +370,7 @@ class DownloadItem:
                 elif self.quality == "High Quality - 1080p":
                     command += ['-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]']
                 elif self.quality == "Medium Quality - 720p":
-                    command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<={res}]']
+                    command += ['-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]']
                 elif "Combined" in self.quality:
                     res = re.search(r'(\d+)p', self.quality).group(1)
                     command += ['-f', f'bestvideo[height<={res}]+bestaudio/best[height<={res}]']
