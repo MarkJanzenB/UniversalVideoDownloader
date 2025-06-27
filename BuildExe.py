@@ -6,7 +6,7 @@ import urllib.request
 
 YT_DLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 YT_DLP_EXE = "yt-dlp.exe"
-FFMPEG_EXE = "ffmpeg.exe"  # Define FFmpeg executable name
+FFMPEG_EXE = "ffmpeg.exe"    # Define FFmpeg executable name
 APP_EXE_NAME = "UniversalVideoDownloader.exe"  # Define the main application executable name
 
 
