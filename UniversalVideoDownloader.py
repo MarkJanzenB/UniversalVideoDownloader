@@ -10,6 +10,9 @@ import time
 import re
 import json
 import tkinter.font
+import urllib.request
+import urllib.parse
+from urllib.error import URLError, HTTPError
 
 # --- Constants for consistent naming and values ---
 # These are now mostly internal or default values, can be overridden by settings
@@ -17,6 +20,7 @@ DEFAULT_DOWNLOADS_DIR = "downloads"
 TEMP_SUBDIR = "temp"
 DEFAULT_SOURCE = "Default"  # Renamed from YOUTUBE_SOURCE
 XTREAM_SOURCE = "XtremeStream"
+TS_STREAM_SOURCE = "TS Stream"  # New source for .ts files and M3U8 playlists
 LOCAL_SOURCE = "Local"
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2  # Default, overridden by settings
 HISTORY_FILE = "download_history.json"  # History file is always fixed
@@ -42,6 +46,237 @@ MAIN_FONT = ("Inter", 10)
 BOLD_FONT = ("Inter", 12, "bold")
 SMALL_FONT = ("Inter", 9)
 MONO_FONT = ("Roboto Mono", 9)
+
+# Enhanced color scheme for better visual hierarchy
+COLOR_BG_LIGHT = "#f8f9fa"
+COLOR_BG_MAIN = "#ffffff"
+COLOR_BORDER = "#dee2e6"
+COLOR_HOVER = "#e9ecef"
+COLOR_ACTIVE_ITEM = "#e7f3ff"
+COLOR_QUEUED_ITEM = "#fff3cd"
+COLOR_COMPLETED_ITEM = "#d4edda"
+COLOR_FAILED_ITEM = "#f8d7da"
+
+
+class PlaceholderEntry(tk.Entry):
+    """Entry widget with placeholder text support."""
+    def __init__(self, master=None, placeholder="", *args, **kwargs):
+        super().__init__(master, *args, **kwargs)
+        self.placeholder = placeholder
+        self.placeholder_color = "#999999"
+        self.default_fg_color = self["fg"]
+        self._has_placeholder = False
+        
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        
+        if placeholder:
+            self._on_focus_out()
+    
+    def _on_focus_in(self, event=None):
+        if self._has_placeholder:
+            self.delete(0, tk.END)
+            self.config(fg=self.default_fg_color)
+            self._has_placeholder = False
+    
+    def _on_focus_out(self, event=None):
+        if not super().get():
+            self.insert(0, self.placeholder)
+            self.config(fg=self.placeholder_color)
+            self._has_placeholder = True
+    
+    def get(self):
+        """Override get() to return empty string if placeholder is shown."""
+        if self._has_placeholder:
+            return ""
+        return super().get()
+    
+    def delete(self, first, last=None):
+        """Override delete to handle placeholder."""
+        result = super().delete(first, last)
+        if not super().get() and self.placeholder:
+            self._has_placeholder = True
+            self.config(fg=self.placeholder_color)
+        else:
+            self._has_placeholder = False
+            self.config(fg=self.default_fg_color)
+        return result
+    
+    def insert(self, index, string):
+        """Override insert to handle placeholder."""
+        result = super().insert(index, string)
+        if super().get() != self.placeholder:
+            self._has_placeholder = False
+            self.config(fg=self.default_fg_color)
+        return result
+
+
+class ToolTip:
+    """Creates a tooltip for a given widget."""
+    def __init__(self, widget, text='widget info'):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.id = None
+        self.x = self.y = 0
+        self.widget.bind('<Enter>', self.enter)
+        self.widget.bind('<Leave>', self.leave)
+        self.widget.bind('<ButtonPress>', self.leave)
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(500, self.showtip)
+
+    def unschedule(self):
+        id = self.id
+        self.id = None
+        if id:
+            self.widget.after_cancel(id)
+
+    def showtip(self, event=None):
+        x, y, cx, cy = self.widget.bbox("insert") if hasattr(self.widget, 'bbox') else (0, 0, 0, 0)
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 20
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                        background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                        font=SMALL_FONT, wraplength=300)
+        label.pack(ipadx=5, ipady=3)
+
+    def hidetip(self):
+        tw = self.tipwindow
+        self.tipwindow = None
+        if tw:
+            tw.destroy()
+
+
+def create_tooltip(widget, text):
+    """Helper function to create a tooltip for a widget."""
+    return ToolTip(widget, text)
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                        background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                        font=SMALL_FONT, wraplength=300)
+        label.pack(ipadx=1)
+
+    def hidetip(self):
+        tw = self.tipwindow
+        self.tipwindow = None
+        if tw:
+            tw.destroy()
+
+
+def create_tooltip(widget, text):
+    """Helper function to create tooltips easily."""
+    return ToolTip(widget, text)
+
+
+def is_ts_url(url):
+    """Detects if URL points to a .ts file or M3U8 playlist."""
+    url_lower = url.lower()
+    return url_lower.endswith('.ts') or url_lower.endswith('.m3u8') or '.m3u8' in url_lower or '.ts' in url_lower
+
+
+def parse_m3u8_playlist(m3u8_url, referer=None):
+    """
+    Parses an M3U8 playlist and returns a list of TS segment URLs.
+    Handles both absolute and relative URLs.
+    """
+    try:
+        req = urllib.request.Request(m3u8_url)
+        if referer:
+            req.add_header('Referer', referer)
+        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        with urllib.request.urlopen(req, timeout=30) as response:
+            content = response.read().decode('utf-8', errors='ignore')
+        
+        base_url = '/'.join(m3u8_url.split('/')[:-1]) + '/'
+        segments = []
+        
+        for line in content.splitlines():
+            line = line.strip()
+            if line and not line.startswith('#'):
+                if line.startswith('http://') or line.startswith('https://'):
+                    segments.append(line)
+                else:
+                    # Relative URL - construct absolute URL
+                    if line.startswith('/'):
+                        parsed_base = urllib.parse.urlparse(m3u8_url)
+                        segments.append(f"{parsed_base.scheme}://{parsed_base.netloc}{line}")
+                    else:
+                        segments.append(base_url + line)
+        
+        return segments
+    except Exception as e:
+        print(f"Error parsing M3U8 playlist: {e}")
+        return []
+
+
+def download_ts_segment(segment_url, output_path, referer=None):
+    """Downloads a single TS segment to the specified path."""
+    try:
+        req = urllib.request.Request(segment_url)
+        if referer:
+            req.add_header('Referer', referer)
+        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        with urllib.request.urlopen(req, timeout=60) as response:
+            with open(output_path, 'wb') as f:
+                shutil.copyfileobj(response, f)
+        return True
+    except Exception as e:
+        print(f"Error downloading TS segment {segment_url}: {e}")
+        return False
+
+
+def merge_ts_segments(ts_files_list, output_file, ffmpeg_path='ffmpeg'):
+    """
+    Merges multiple TS segments into a single MP4 file using FFmpeg.
+    Uses concat demuxer for efficient merging.
+    """
+    try:
+        # Create a temporary file list for FFmpeg concat demuxer
+        concat_file = output_file + '_concat_list.txt'
+        with open(concat_file, 'w', encoding='utf-8') as f:
+            for ts_file in ts_files_list:
+                # Escape single quotes and backslashes for FFmpeg
+                escaped_path = ts_file.replace('\\', '/').replace("'", "'\\''")
+                f.write(f"file '{escaped_path}'\n")
+        
+        # Use FFmpeg concat demuxer for fast merging
+        command = [
+            ffmpeg_path,
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_file,
+            '-c', 'copy',  # Copy streams without re-encoding for speed
+            '-y',  # Overwrite output file
+            output_file
+        ]
+        
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        result = subprocess.run(command, capture_output=True, text=True, 
+                               creationflags=creationflags, timeout=3600)
+        
+        # Clean up concat file
+        try:
+            os.remove(concat_file)
+        except:
+            pass
+        
+        return result.returncode == 0
+    except Exception as e:
+        print(f"Error merging TS segments: {e}")
+        return False
 
 
 class DownloadItem:
@@ -69,10 +304,25 @@ class DownloadItem:
         self.elapsed_time_seconds = item_data.get('elapsed_time_seconds', 0)
 
         self.is_local_conversion = (self.source == LOCAL_SOURCE)
+        self.is_ts_stream = (self.source == TS_STREAM_SOURCE) or (is_ts_url(self.source_path) and self.source == DEFAULT_SOURCE)
 
         if self.is_local_conversion:
             self.video_title = os.path.basename(self.source_path)
             self.filename = os.path.splitext(os.path.basename(self.source_path))[0]
+            self.is_title_fetched = True
+            self.ready_for_download = True
+            self.expected_final_ext = ".mp4"
+        elif self.is_ts_stream:
+            # For TS streams, we can start immediately if filename is provided
+            if not self.filename_provided_by_user:
+                # Try to extract a reasonable filename from URL
+                url_path = urllib.parse.urlparse(self.source_path).path
+                base_name = os.path.splitext(os.path.basename(url_path))[0]
+                if base_name and base_name != 'playlist' and base_name != 'index':
+                    self.filename = base_name
+                else:
+                    self.filename = f"TS_Stream_{self.item_id}"
+            self.video_title = self.filename if self.filename else f"TS Stream {self.item_id}"
             self.is_title_fetched = True
             self.ready_for_download = True
             self.expected_final_ext = ".mp4"
@@ -93,7 +343,7 @@ class DownloadItem:
         self.frame = None
         self.retry_button = None
 
-        if self.is_active_item and not self.filename_provided_by_user and not self.is_title_fetched and not self.is_local_conversion:
+        if self.is_active_item and not self.filename_provided_by_user and not self.is_title_fetched and not self.is_local_conversion and not self.is_ts_stream:
             self.fetch_title_async()
 
     def _build_frame_widgets(self):
@@ -101,7 +351,20 @@ class DownloadItem:
         if self.frame and self.frame.winfo_exists():
             self.frame.destroy()
 
-        self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.GROOVE, padx=2, pady=2, bg="#f0f0f0")
+        # Enhanced visual styling based on status
+        bg_color = COLOR_BG_LIGHT
+        if self.is_active_item:
+            if self.status == "queued":
+                bg_color = COLOR_QUEUED_ITEM
+            elif self.status in ["active", "Downloading", "Converting"]:
+                bg_color = COLOR_ACTIVE_ITEM
+        elif self.status == "completed":
+            bg_color = COLOR_COMPLETED_ITEM
+        elif self.status == "failed":
+            bg_color = COLOR_FAILED_ITEM
+        
+        self.frame = tk.Frame(self.parent_frame, bd=2, relief=tk.RAISED, padx=4, pady=4, 
+                             bg=bg_color, highlightbackground=COLOR_BORDER, highlightthickness=1)
         self.frame.columnconfigure(0, weight=4)
         self.frame.columnconfigure(1, weight=2)
         self.frame.columnconfigure(2, weight=1)
@@ -110,17 +373,31 @@ class DownloadItem:
         self.frame.columnconfigure(5, weight=1)
         self.frame.columnconfigure(6, weight=1)  # Added for new 'Remove' button
 
-        self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg="#f0f0f0", justify="left")
-        self.title_label.grid(row=0, column=0, sticky="nw", padx=2, pady=0)
+        self.title_label = tk.Label(self.frame, text="", font=MAIN_FONT, anchor="w", bg=bg_color, 
+                                    justify="left", cursor="hand2")
+        self.title_label.grid(row=0, column=0, sticky="nw", padx=4, pady=2)
+        # Add tooltip for title
+        if hasattr(self, 'video_title') and self.video_title:
+            create_tooltip(self.title_label, f"Source: {self.source}\nURL: {self.source_path[:100] if len(self.source_path) > 100 else self.source_path}")
 
-        self.status_progress_frame = tk.Frame(self.frame, bg="#f0f0f0")
-        self.status_progress_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=0)
+        self.status_progress_frame = tk.Frame(self.frame, bg=bg_color)
+        self.status_progress_frame.grid(row=0, column=1, sticky="nsew", padx=4, pady=2)
         self.status_progress_frame.columnconfigure(0, weight=1)
 
-        self.progress_bar = ttk.Progressbar(self.status_progress_frame, orient="horizontal", mode="determinate",
-                                            length=120)
+        # Enhanced progress bar with better styling
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("Custom.Horizontal.TProgressbar", 
+                       background=COLOR_STATUS_PROGRESS,
+                       troughcolor=COLOR_BG_LIGHT,
+                       borderwidth=0,
+                       lightcolor=COLOR_STATUS_PROGRESS,
+                       darkcolor=COLOR_STATUS_PROGRESS)
+        
+        self.progress_bar = ttk.Progressbar(self.status_progress_frame, orient="horizontal", 
+                                           mode="determinate", length=150, style="Custom.Horizontal.TProgressbar")
         self.status_label = tk.Label(self.status_progress_frame, text="", font=SMALL_FONT, anchor="center",
-                                     fg=self._get_status_color(self.status), bg="#f0f0f0", width=14)
+                                     fg=self._get_status_color(self.status), bg=bg_color, width=16)
 
         if self.is_active_item:
             self.progress_bar.grid(row=0, column=0, sticky="ew")
@@ -129,26 +406,41 @@ class DownloadItem:
             self.progress_bar.grid_forget()
             self.status_label.grid(row=0, column=0, sticky="ew")
 
-        self.date_added_label = tk.Label(self.frame, text=self.date_added, font=SMALL_FONT, anchor="w", bg="#f0f0f0",
-                                         width=10)
-        self.date_added_label.grid(row=0, column=2, sticky="w", padx=2, pady=0)
+        self.date_added_label = tk.Label(self.frame, text=self.date_added, font=SMALL_FONT, anchor="w", bg=bg_color,
+                                         width=12, fg="#6c757d")
+        self.date_added_label.grid(row=0, column=2, sticky="w", padx=4, pady=2)
+        create_tooltip(self.date_added_label, "Date added to queue")
 
         self.date_completed_label = tk.Label(self.frame, text=self.date_completed, font=SMALL_FONT, anchor="w",
-                                             bg="#f0f0f0", width=10)
-        self.date_completed_label.grid(row=0, column=3, sticky="w", padx=2, pady=0)
+                                             bg=bg_color, width=12, fg="#6c757d")
+        self.date_completed_label.grid(row=0, column=3, sticky="w", padx=4, pady=2)
+        create_tooltip(self.date_completed_label, "Date completed")
 
-        self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg="#f0f0f0", width=8)
-        self.elapsed_time_label.grid(row=0, column=4, sticky="w", padx=2, pady=0)
+        self.elapsed_time_label = tk.Label(self.frame, text="", font=SMALL_FONT, anchor="w", bg=bg_color, width=10,
+                                          fg="#495057")
+        self.elapsed_time_label.grid(row=0, column=4, sticky="w", padx=4, pady=2)
+        create_tooltip(self.elapsed_time_label, "Elapsed time / ETA")
 
-        self.abort_button = tk.Button(self.frame, text="Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
-                                      fg="white", font=SMALL_FONT, width=8)
-        self.open_file_button = tk.Button(self.frame, text="Open File", command=self._open_file_location,
-                                          bg=COLOR_OPEN_FILE_BUTTON, fg="white", font=SMALL_FONT, width=10)
-        self.retry_button = tk.Button(self.frame, text="Retry", command=self.retry_download, bg=COLOR_ADD_BUTTON,
-                                      fg="white", font=SMALL_FONT, width=10)
-        self.remove_button = tk.Button(self.frame, text="Remove", command=self._confirm_and_remove,
-                                       bg=COLOR_REMOVE_BUTTON,
-                                       fg="white", font=SMALL_FONT, width=10)  # New Remove button
+        # Enhanced buttons with hover effects and tooltips
+        self.abort_button = tk.Button(self.frame, text="⏹ Abort", command=self.abort_download, bg=COLOR_ABORT_BUTTON,
+                                      fg="white", font=SMALL_FONT, width=10, relief=tk.RAISED, bd=2,
+                                      activebackground="#c82333", cursor="hand2")
+        create_tooltip(self.abort_button, "Stop this download")
+        
+        self.open_file_button = tk.Button(self.frame, text="📁 Open", command=self._open_file_location,
+                                          bg=COLOR_OPEN_FILE_BUTTON, fg="white", font=SMALL_FONT, width=10,
+                                          relief=tk.RAISED, bd=2, activebackground="#138496", cursor="hand2")
+        create_tooltip(self.open_file_button, "Open file location in explorer")
+        
+        self.retry_button = tk.Button(self.frame, text="🔄 Retry", command=self.retry_download, bg=COLOR_ADD_BUTTON,
+                                      fg="white", font=SMALL_FONT, width=10, relief=tk.RAISED, bd=2,
+                                      activebackground="#218838", cursor="hand2")
+        create_tooltip(self.retry_button, "Retry this download")
+        
+        self.remove_button = tk.Button(self.frame, text="🗑 Remove", command=self._confirm_and_remove,
+                                       bg=COLOR_REMOVE_BUTTON, fg="white", font=SMALL_FONT, width=10,
+                                       relief=tk.RAISED, bd=2, activebackground="#5a6268", cursor="hand2")
+        create_tooltip(self.remove_button, "Remove from list (optionally delete file)")
 
         if self.is_active_item:
             self.abort_button.grid(row=0, column=5, sticky="e", padx=2, pady=0)
@@ -170,14 +462,18 @@ class DownloadItem:
                 self.progress_bar.lift()
             if hasattr(self, 'status_label') and self.status_label.winfo_exists():
                 self.status_label.place(relx=0.5, rely=0.5, anchor="center")
-                self.status_label.config(bg="#f0f0f0")
+                # Get current bg color from frame
+                bg_color = self.frame.cget('bg')
+                self.status_label.config(bg=bg_color)
         else:
             if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
                 self.progress_bar.grid_forget()
             if hasattr(self, 'status_label') and self.status_label.winfo_exists():
                 self.status_label.place_forget()
                 self.status_label.grid(row=0, column=0, sticky="ew")
-                self.status_label.config(bg="#f0f0f0")
+                # Get current bg color from frame
+                bg_color = self.frame.cget('bg')
+                self.status_label.config(bg=bg_color)
 
     def _get_status_color(self, status_text):
         """Returns the color based on status text."""
@@ -327,9 +623,13 @@ class DownloadItem:
         if self.elapsed_time_label.winfo_exists():
             self.elapsed_time_label.config(text=self._format_seconds_to_dd_hh_mm_ss(0))
 
-        command = self._build_command()
-        is_ffmpeg_process = (self.source == LOCAL_SOURCE)
-        threading.Thread(target=self._run_conversion_process, args=(command, is_ffmpeg_process,), daemon=True).start()
+        if self.is_ts_stream:
+            # Handle TS stream download and merging
+            threading.Thread(target=self._download_and_merge_ts_stream, daemon=True).start()
+        else:
+            command = self._build_command()
+            is_ffmpeg_process = (self.source == LOCAL_SOURCE)
+            threading.Thread(target=self._run_conversion_process, args=(command, is_ffmpeg_process,), daemon=True).start()
 
     def _build_command(self):
         """Builds the yt-dlp or ffmpeg command for this specific item."""
@@ -381,6 +681,137 @@ class DownloadItem:
             command += ["--paths", f"temp:{temp_dir}", "--newline"]
             print(f"Yt-dlp Command: {' '.join(command)}")
         return command
+
+    def _download_and_merge_ts_stream(self):
+        """Downloads TS segments (from M3U8 or single .ts) and merges them into MP4."""
+        downloads_dir = os.path.join(os.getcwd(), self.app_instance.settings['output_directory'])
+        temp_dir = os.path.join(downloads_dir, TEMP_SUBDIR, str(self.item_id))
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        final_output = os.path.join(temp_dir, self.filename + ".mp4")
+        ts_segments = []
+        final_status = "failed"  # Initialize to failed, will be updated on success
+        
+        try:
+            # Determine if URL is M3U8 playlist or single .ts file
+            url_lower = self.source_path.lower()
+            is_m3u8 = url_lower.endswith('.m3u8') or '.m3u8' in url_lower
+            is_single_ts = url_lower.endswith('.ts')
+            
+            if is_m3u8:
+                # Parse M3U8 playlist to get all TS segment URLs
+                self.app_instance.master.after(0, lambda: self.update_status("Parsing M3U8 playlist...", COLOR_STATUS_PROGRESS))
+                if self.app_instance.log_window_visible and self.app_instance.log_text:
+                    self.app_instance.master.after(0, lambda: self._append_to_log(f"Parsing M3U8 playlist: {self.source_path}\n"))
+                
+                segment_urls = parse_m3u8_playlist(self.source_path, self.referer if self.referer else None)
+                
+                if not segment_urls:
+                    raise Exception("No TS segments found in M3U8 playlist")
+                
+                total_segments = len(segment_urls)
+                self.app_instance.master.after(0, lambda: self.update_status(f"Found {total_segments} segments. Downloading...", COLOR_STATUS_PROGRESS))
+                
+                # Download each segment
+                for idx, segment_url in enumerate(segment_urls):
+                    if self.is_aborted:
+                        raise Exception("Download aborted by user")
+                    
+                    segment_filename = f"segment_{idx:05d}.ts"
+                    segment_path = os.path.join(temp_dir, segment_filename)
+                    
+                    # Update progress
+                    progress = int((idx / total_segments) * 90)  # Reserve 10% for merging
+                    if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+                        self.app_instance.master.after(0, lambda p=progress: self.progress_bar.config(value=p))
+                    self.app_instance.master.after(0, lambda idx=idx, total=total_segments: self.update_status(
+                        f"Downloading segment {idx+1}/{total}...", COLOR_STATUS_PROGRESS))
+                    
+                    if self.app_instance.log_window_visible and self.app_instance.log_text:
+                        self.app_instance.master.after(0, lambda url=segment_url: self._append_to_log(f"Downloading: {url}\n"))
+                    
+                    # Download segment
+                    if download_ts_segment(segment_url, segment_path, self.referer if self.referer else None):
+                        ts_segments.append(segment_path)
+                    else:
+                        print(f"Warning: Failed to download segment {idx+1}: {segment_url}")
+                        # Continue with other segments instead of failing completely
+                
+                if not ts_segments:
+                    raise Exception("Failed to download any TS segments")
+                    
+            elif is_single_ts:
+                # Single .ts file - download directly
+                self.app_instance.master.after(0, lambda: self.update_status("Downloading TS file...", COLOR_STATUS_PROGRESS))
+                segment_path = os.path.join(temp_dir, "segment_00000.ts")
+                
+                if download_ts_segment(self.source_path, segment_path, self.referer if self.referer else None):
+                    ts_segments.append(segment_path)
+                else:
+                    raise Exception("Failed to download TS file")
+            else:
+                raise Exception("URL does not appear to be a valid .ts file or M3U8 playlist")
+            
+            # Merge all segments using FFmpeg
+            if self.is_aborted:
+                raise Exception("Download aborted by user")
+            
+            self.app_instance.master.after(0, lambda: self.update_status("Merging segments...", COLOR_STATUS_PROGRESS))
+            if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+                self.app_instance.master.after(0, lambda: self.progress_bar.config(value=90, mode="indeterminate"))
+                self.app_instance.master.after(0, lambda: self.progress_bar.start())
+            
+            if self.app_instance.log_window_visible and self.app_instance.log_text:
+                self.app_instance.master.after(0, lambda: self._append_to_log(f"Merging {len(ts_segments)} segments into MP4...\n"))
+            
+            # Merge segments
+            if merge_ts_segments(ts_segments, final_output):
+                # Move final file to downloads directory
+                final_destination = os.path.join(downloads_dir, self.filename + ".mp4")
+                os.makedirs(downloads_dir, exist_ok=True)
+                shutil.move(final_output, final_destination)
+                
+                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+                    self.app_instance.master.after(0, lambda: self.progress_bar.stop())
+                    self.app_instance.master.after(0, lambda: self.progress_bar.config(value=100, mode="determinate"))
+                
+                final_status = "completed"
+                self.update_status("completed", COLOR_STATUS_COMPLETE)
+            else:
+                raise Exception("Failed to merge TS segments")
+                
+        except Exception as e:
+            if "aborted" in str(e).lower() or self.is_aborted:
+                final_status = "aborted"
+                self.update_status("aborted", COLOR_STATUS_ABORTED)
+            else:
+                final_status = "failed"
+                self.update_status("failed", COLOR_STATUS_FAILED)
+                error_msg = f"TS stream download error: {str(e)}"
+                print(error_msg)
+                if self.app_instance.log_window_visible and self.app_instance.log_text:
+                    self.app_instance.master.after(0, lambda msg=error_msg: self._append_to_log(f"ERROR: {msg}\n"))
+                messagebox.showerror("TS Download Error", error_msg)
+        finally:
+            # Cleanup: remove temporary TS segments
+            for segment_path in ts_segments:
+                try:
+                    if os.path.exists(segment_path):
+                        os.remove(segment_path)
+                except:
+                    pass
+            
+            # Cleanup temp directory
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except:
+                pass
+            
+            if self.abort_button.winfo_exists():
+                self.abort_button.config(state="disabled")
+            
+            self.app_instance.download_finished(self, final_status)
 
     def _run_conversion_process(self, command, is_ffmpeg_process):
         """Runs the subprocess (yt-dlp or ffmpeg) and captures its output."""
@@ -717,14 +1148,20 @@ class YTDLPGUIApp:
 
     def _setup_window(self, master):
         master.title("Universal Video Downloader & Converter")
-        master.geometry("1000x650")
-        master.resizable(False, False)
-        master.minsize(1000, 650)
-        master.maxsize(1000, 650)
+        master.geometry("1200x750")
+        master.resizable(True, True)
+        master.minsize(900, 600)
+        # Center window on screen
         try:
             master.iconbitmap("ico.ico")
         except Exception:
             pass
+        master.update_idletasks()
+        width = master.winfo_width()
+        height = master.winfo_height()
+        x = (master.winfo_screenwidth() // 2) - (width // 2)
+        y = (master.winfo_screenheight() // 2) - (height // 2)
+        master.geometry(f'{width}x{height}+{x}+{y}')
 
     def _create_menus(self):
         """Creates the application menus."""
@@ -733,6 +1170,8 @@ class YTDLPGUIApp:
 
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="User Guide (F1)", command=self._show_help)
+        help_menu.add_separator()
         help_menu.add_command(label="About Versions...", command=self._show_versions_info)
 
         options_menu = tk.Menu(menubar, tearoff=0)
@@ -931,6 +1370,155 @@ class YTDLPGUIApp:
         if selected_dir:
             output_dir_var.set(selected_dir)
 
+    def _show_help(self):
+        """Shows a comprehensive help dialog with usage instructions."""
+        help_window = tk.Toplevel(self.master)
+        help_window.title("User Guide - Universal Video Downloader")
+        help_window.geometry("700x600")
+        help_window.transient(self.master)
+        help_window.resizable(True, True)
+        
+        # Create scrollable text widget
+        help_frame = tk.Frame(help_window)
+        help_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        help_text = scrolledtext.ScrolledText(help_frame, wrap=tk.WORD, font=MAIN_FONT, 
+                                              bg=COLOR_BG_MAIN, padx=10, pady=10)
+        help_text.pack(fill="both", expand=True)
+        
+        help_content = """Universal Video Downloader & Converter - User Guide
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📥 QUICK START
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Select a Source Type:
+   • Default: For YouTube, Vimeo, and most video sites
+   • XtremeStream: For sites requiring a referer header
+   • TS Stream: For .ts files and M3U8 playlists (HLS streams)
+   • Local: Convert local video files to MP4
+
+2. Enter the URL or select a file
+3. Choose quality (if applicable)
+4. Optionally set a custom filename
+5. Click "Add to Queue" or press Enter
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⌨️  KEYBOARD SHORTCUTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Enter          - Add current item to queue
+Ctrl+Q         - Add to queue
+Ctrl+O         - Open downloads folder
+Ctrl+L         - Toggle process log window
+F1             - Show this help dialog
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 SOURCE TYPES EXPLAINED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• Default Source:
+  - Works with YouTube, Vimeo, and 1000+ sites
+  - Auto-detects TS/M3U8 URLs and switches to TS Stream mode
+  - Supports quality selection and MP3 conversion
+
+• XtremeStream Source:
+  - For sites that require a referer header
+  - Enter the referer URL (usually the page where video is embedded)
+  - Then enter the video URL
+
+• TS Stream Source:
+  - For downloading .ts video segments
+  - Supports M3U8 playlists (HLS streaming)
+  - Automatically downloads all segments and merges them
+  - Optional referer support for protected streams
+
+• Local Source:
+  - Convert local video files to MP4
+  - Supports various input formats (MP4, MKV, AVI, MOV, etc.)
+  - Quality options: Same as source, High, Medium, Low
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚙️  FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Queue Management:
+  - Add multiple downloads
+  - Control concurrent downloads in Settings
+  - Abort active downloads
+  - Retry failed downloads
+  - Remove items from queue/history
+
+✓ Progress Tracking:
+  - Real-time progress bars
+  - Download speed and ETA
+  - Elapsed time display
+  - Status indicators (Queued, Active, Completed, Failed)
+
+✓ History:
+  - All downloads saved to history
+  - Sort by name, status, date, or time
+  - Quick access to completed files
+  - Retry failed downloads
+
+✓ Settings:
+  - Configure output directory
+  - Set default quality per source
+  - Control concurrent downloads (1-5)
+  - Customize removal behavior
+  - Toggle log window on startup
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 TIPS & TRICKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• Hover over buttons and fields for helpful tooltips
+• Use placeholder text as a guide for what to enter
+• The app auto-detects TS streams - just paste the URL
+• Custom filenames: Invalid characters are automatically removed
+• MP3 conversion: Only available for online sources
+• View > Show Process Log: See detailed download/convert progress
+• Right-click on download items for quick actions (coming soon)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❓ TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Problem: Download fails
+Solution: Check the Process Log (View > Show Process Log) for details.
+          Some sites may require a referer - try XtremeStream source.
+
+Problem: TS stream not downloading
+Solution: Ensure the M3U8 URL is accessible. Some streams require a referer.
+          Check if FFmpeg is installed for merging segments.
+
+Problem: File not found after download
+Solution: Check Settings > Output Directory. Files are saved there.
+
+Problem: Can't convert local file
+Solution: Ensure FFmpeg is installed and in PATH, or place ffmpeg.exe
+          in the application directory.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For more information, visit the project repository or check the README file.
+"""
+        
+        help_text.insert("1.0", help_content)
+        help_text.config(state=tk.DISABLED)
+        
+        close_button = tk.Button(help_window, text="Close", command=help_window.destroy,
+                                bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT, padx=20, pady=5)
+        close_button.pack(pady=10)
+        
+        help_window.focus_set()
+
     def _show_versions_info(self):
         """Displays yt-dlp and ffmpeg version information."""
         yt_dlp_version = "Not Found";
@@ -1004,7 +1592,7 @@ class YTDLPGUIApp:
         # Source Selection (Row 0)
         tk.Label(input_frame, text="Source:", font=MAIN_FONT).grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.source_var = tk.StringVar(value=DEFAULT_SOURCE)
-        self.source_menu = tk.OptionMenu(input_frame, self.source_var, DEFAULT_SOURCE, XTREAM_SOURCE, LOCAL_SOURCE,
+        self.source_menu = tk.OptionMenu(input_frame, self.source_var, DEFAULT_SOURCE, XTREAM_SOURCE, TS_STREAM_SOURCE, LOCAL_SOURCE,
                                          command=self.on_source_change)
         self.source_menu.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
         self.master.update_idletasks()  # Force update after gridding OptionMenu
@@ -1016,9 +1604,16 @@ class YTDLPGUIApp:
 
         # Common input widgets (initialized but not gridded directly, will be placed in dynamic_input_container)
         self.url_label = tk.Label(self.dynamic_input_container, text="Target URL:", font=MAIN_FONT)
-        self.url_entry = tk.Entry(self.dynamic_input_container, font=MAIN_FONT)
+        self.url_entry = PlaceholderEntry(self.dynamic_input_container, 
+                                         placeholder="Paste video URL here (YouTube, Vimeo, etc.)",
+                                         font=MAIN_FONT)
+        create_tooltip(self.url_entry, "Enter the URL of the video you want to download.\nSupports YouTube, Vimeo, and many other sites.")
+        
         self.referer_label = tk.Label(self.dynamic_input_container, text="Referer URL:", font=MAIN_FONT)
-        self.referer_entry = tk.Entry(self.dynamic_input_container, font=MAIN_FONT)
+        self.referer_entry = PlaceholderEntry(self.dynamic_input_container,
+                                              placeholder="Optional: Enter referer URL if needed",
+                                              font=MAIN_FONT)
+        create_tooltip(self.referer_entry, "Some sites require a referer header.\nEnter the URL of the page where the video is embedded.")
         self.local_filepath_label = tk.Label(self.dynamic_input_container, text="No file selected", font=MAIN_FONT,
                                              anchor="w", wraplength=400)
         self.browse_file_button = tk.Button(self.dynamic_input_container, text="Browse Local File",
@@ -1038,10 +1633,15 @@ class YTDLPGUIApp:
                                                 "High Quality MP4", "Medium Quality MP4", "Low Quality MP4")
 
         # Output Filename (common for all sources, placed below dynamic inputs)
-        tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT).grid(row=2, column=0, sticky="w",
-                                                                                       padx=5, pady=2)
-        self.filename_entry = tk.Entry(input_frame, font=MAIN_FONT)
+        filename_label = tk.Label(input_frame, text="Output Filename (optional):", font=MAIN_FONT)
+        filename_label.grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        create_tooltip(filename_label, "Custom filename for the downloaded file.\nIf left empty, the video title will be used.")
+        
+        self.filename_entry = PlaceholderEntry(input_frame,
+                                               placeholder="Leave empty to use video title",
+                                               font=MAIN_FONT)
         self.filename_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=2)
+        create_tooltip(self.filename_entry, "Enter a custom filename (without extension).\nInvalid characters will be automatically removed.")
 
         # MP3 Conversion (common for online sources, placed below filename)
         self.mp3_var = tk.BooleanVar()
@@ -1050,13 +1650,20 @@ class YTDLPGUIApp:
         self.mp3_check.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # Add to Queue Button (Fixed position at the bottom of input_frame)
-        self.add_to_queue_button = tk.Button(input_frame, text="Add to Queue", command=self._add_current_to_queue,
-                                             bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT)
+        self.add_to_queue_button = tk.Button(input_frame, text="➕ Add to Queue", command=self._add_current_to_queue,
+                                             bg=COLOR_ADD_BUTTON, fg="white", font=BOLD_FONT,
+                                             relief=tk.RAISED, bd=3, activebackground="#218838",
+                                             cursor="hand2", padx=10, pady=5)
         self.add_to_queue_button.grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
+        create_tooltip(self.add_to_queue_button, "Add this download to the queue\n(Shortcut: Enter key)")
 
-        # Bind events
+        # Bind events and keyboard shortcuts
         self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
         self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
+        self.master.bind("<Control-q>", lambda e: self._add_current_to_queue())
+        self.master.bind("<Control-o>", lambda e: self._open_downloads_folder())
+        self.master.bind("<Control-l>", lambda e: self._toggle_log_window())
+        self.master.bind("<F1>", lambda e: self._show_help())
 
         control_buttons_frame = tk.Frame(self.main_frame)
         control_buttons_frame.pack(fill="x", pady=5)
@@ -1102,9 +1709,19 @@ class YTDLPGUIApp:
         self.downloads_canvas.bind('<Button-4>', self._on_mousewheel)
         self.downloads_canvas.bind('<Button-5>', self._on_mousewheel)
 
-        self.status_bar = tk.Label(self.master, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, font=SMALL_FONT,
-                                   fg=COLOR_STATUS_READY)
-        self.status_bar.pack(side="bottom", fill="x")
+        # Enhanced status bar with better visual feedback
+        status_frame = tk.Frame(self.master, bg=COLOR_BG_LIGHT, bd=1, relief=tk.SUNKEN)
+        status_frame.pack(side="bottom", fill="x")
+        
+        self.status_bar = tk.Label(status_frame, text="✓ Ready - Paste a URL and press Enter to add to queue", 
+                                  bd=0, anchor=tk.W, font=SMALL_FONT, fg=COLOR_STATUS_READY, bg=COLOR_BG_LIGHT,
+                                  padx=10, pady=5)
+        self.status_bar.pack(side="left", fill="x", expand=True)
+        
+        # Queue status indicator
+        self.queue_status_label = tk.Label(status_frame, text="", bd=0, anchor=tk.E, font=SMALL_FONT,
+                                          bg=COLOR_BG_LIGHT, padx=10, pady=5)
+        self.queue_status_label.pack(side="right")
 
     def _on_mousewheel(self, event):
         """Handles mouse wheel scrolling for the combined downloads canvas."""
@@ -1143,6 +1760,7 @@ class YTDLPGUIApp:
         current_row_idx = 0  # Start from row 0 within the dynamic_input_container
 
         if value == DEFAULT_SOURCE:
+            self.url_label.config(text="Target URL:")  # Reset label text
             self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
             self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
             current_row_idx += 1
@@ -1175,6 +1793,20 @@ class YTDLPGUIApp:
             # Set default quality from settings (it's "Auto" for XtremeStream anyway)
             self.quality_var.set(self.settings['default_default_quality'])
 
+        elif value == TS_STREAM_SOURCE:
+            self.url_label.config(text="TS/M3U8 URL:")
+            self.url_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.url_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            current_row_idx += 1
+            self.referer_label.grid(row=current_row_idx, column=0, sticky="w", padx=5, pady=2)
+            self.referer_entry.grid(row=current_row_idx, column=1, sticky="ew", padx=5, pady=2)
+            self.url_entry.bind("<Return>", self._add_to_queue_on_enter)
+            self.url_entry.bind("<FocusOut>", self._on_url_focus_out)
+            self.mp3_check.config(state="disabled")  # TS streams are always video
+            self.mp3_var.set(False)
+            # Hide quality menu for TS streams (not applicable)
+            self.quality_label.grid_forget()
+            self.quality_menu.grid_forget()
 
         elif value == LOCAL_SOURCE:
             self.url_entry.unbind("<Return>")
@@ -1191,8 +1823,12 @@ class YTDLPGUIApp:
             self.local_quality_var.set(self.settings['default_local_quality'])
 
         # Always ensure common input fields are cleared/reset when source changes
-        self.url_entry.delete(0, END)
-        self.referer_entry.delete(0, END)
+        # (except when programmatically changing to TS_STREAM_SOURCE)
+        if value != TS_STREAM_SOURCE or not hasattr(self, '_preserve_url_on_ts_switch'):
+            self.url_entry.delete(0, END)
+            self.referer_entry.delete(0, END)
+        if hasattr(self, '_preserve_url_on_ts_switch'):
+            delattr(self, '_preserve_url_on_ts_switch')
         self.local_filepath_label.config(text="No file selected")
         self.selected_local_filepath = None
         self.filename_entry.delete(0, END)  # Clear filename entry explicitly
@@ -1206,6 +1842,37 @@ class YTDLPGUIApp:
     def _set_status(self, text, color="black"):
         """Updates the main status bar."""
         self.status_bar.config(text=text, fg=color)
+        self._update_queue_status()
+    
+    def _update_queue_status(self):
+        """Updates the queue status indicator in the status bar."""
+        queued_count = len(self.queued_downloads)
+        active_count = len(self.active_downloads)
+        total_count = len(self.download_items_map)
+        
+        if queued_count > 0 or active_count > 0:
+            status_text = f"Queue: {queued_count} | Active: {active_count} | Total: {total_count}"
+            self.queue_status_label.config(text=status_text, fg=COLOR_STATUS_PROGRESS)
+        else:
+            self.queue_status_label.config(text="", fg=COLOR_STATUS_READY)
+        self._update_queue_status()
+    
+    def _update_queue_status(self):
+        """Updates the queue status indicator in the status bar."""
+        active_count = len(self.active_downloads)
+        queued_count = len(self.queued_downloads)
+        total_count = len(self.download_items_map)
+        completed_count = sum(1 for item in self.download_items_map.values() if item.status == "completed")
+        
+        if active_count > 0 or queued_count > 0:
+            status_text = f"Active: {active_count} | Queued: {queued_count}"
+            if completed_count > 0:
+                status_text += f" | Completed: {completed_count}"
+            self.queue_status_label.config(text=status_text, fg=COLOR_STATUS_PROGRESS)
+        elif total_count > 0:
+            self.queue_status_label.config(text=f"Total: {total_count} items", fg=COLOR_STATUS_READY)
+        else:
+            self.queue_status_label.config(text="")
 
     def _browse_output_directory(self, output_dir_var):
         selected_dir = filedialog.askdirectory(
@@ -1257,8 +1924,29 @@ class YTDLPGUIApp:
             if not source_path: messagebox.showwarning("Input Error", "Target URL is required."); return
             if not (source_path.startswith("http://") or source_path.startswith("https://")): messagebox.showwarning(
                 "Input Error", "Invalid URL. Must start with http:// or https://"); return
-            quality = self.quality_var.get()
-            referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
+            
+            # Auto-detect TS streams if using Default source
+            if source == DEFAULT_SOURCE and is_ts_url(source_path):
+                source = TS_STREAM_SOURCE
+                self.source_var.set(TS_STREAM_SOURCE)
+                self._preserve_url_on_ts_switch = True  # Flag to preserve URL during source change
+                self.on_source_change(TS_STREAM_SOURCE)
+                # Re-populate URL entry after source change clears it
+                self.url_entry.delete(0, END)
+                self.url_entry.insert(0, source_path)
+                # Re-populate referer if it was set
+                if self.referer_entry.get().strip():
+                    referer_val = self.referer_entry.get().strip()
+                    self.referer_entry.delete(0, END)
+                    self.referer_entry.insert(0, referer_val)
+            
+            if source == TS_STREAM_SOURCE:
+                quality = "N/A"  # Not applicable for TS streams
+                referer = self.referer_entry.get().strip()
+                mp3_conversion = False  # TS streams are always video
+            else:
+                quality = self.quality_var.get()
+                referer = self.referer_entry.get().strip() if source == XTREAM_SOURCE else ""
 
         self.download_item_counter += 1
         item_id = self.download_item_counter
